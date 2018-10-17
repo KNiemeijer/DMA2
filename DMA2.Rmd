@@ -3,50 +3,36 @@ title: "Data Mining Assignment 2"
 output: html_notebook
 ---
 
-```{r}
-path <- "C:/users/koenn/Google Drive/DM/Practical/DMA2"
-```
-
-Load libraries
-```{r, message=FALSE, warning=FALSE}
-library(rpart)
-library(rpart.plot)
-library(randomForest)
-library(glmnet)
-```
-
 Load the text files into memory
 ```{r}
 library(tm)
-topDirs <- dir(file.path(path, 'Reviews'))
-for(top in topDirs) {
-  foldDirs <- dir(file.path(path, 'Reviews', top), pattern='fold[[:alnum:]]')
-  for(i in foldDirs) {
-    read_path <- file.path(path, 'Reviews', top, i)
-    assign(paste0(top, "_", i), VCorpus(DirSource(read_path, encoding="UTF-8")))
-  }
-}
-train_truth <- c(truthful_fold1, truthful_fold2, truthful_fold3, truthful_fold4)
-train_decep <- c(deceptive_fold1, deceptive_fold2, deceptive_fold3, deceptive_fold4)
-train <- c(train_truth, train_decep)
-test <- c(truthful_fold5, deceptive_fold5)
+reviews.decep <- VCorpus(DirSource("C:/users/koenn/Google Drive/DM/Practical/DMA2/Reviews/deceptive", encoding="UTF-8", recursive=TRUE))
+reviews.truth <- VCorpus(DirSource("C:/users/koenn/Google Drive/DM/Practical/DMA2/Reviews/truthful", encoding="UTF-8", recursive=TRUE))
+reviews.all <- c(reviews.decep, reviews.truth)
+labels <- c(rep(0,400),rep(1,400))
 ```
 
 Preprocess the text corpus and create a document-term matrix
 ```{r}
-train <- tm_map(train, removePunctuation)
-train <- tm_map(train, PlainTextDocument)
-train <- tm_map(train, removeWords, stopwords("english"))
-train <- tm_map(train, removeNumbers)
-train <- tm_map(train, stripWhitespace)
-train <- tm_map(train, stemDocument)
-index.neg <- sample(12500, 8000)
-index.pos <- sample(12500+sample(12500, 8000))
-index.train <- c(index.neg, index.pos)
-train.dtm <- DocumentTermMatrix(train[index.train]) # Throws error due to cleaning
+# Clean all reviews
+reviews.all <- tm_map(reviews.all,removePunctuation)
+reviews.all <- tm_map(reviews.all,content_transformer(tolower))
+reviews.all <- tm_map(reviews.all, removeWords,
+stopwords("english"))
+reviews.all <- tm_map(reviews.all,removeNumbers)
+reviews.all <- tm_map(reviews.all,stripWhitespace)
+reviews.all <- tm_map(reviews.all, stemDocument, language="english")
+
+# Set up dtm
+index.train <- c(1:320, 400 + 1:320)
+train.dtm <- DocumentTermMatrix(reviews.all[index.train])
+#train.dtm <- removeSparseTerms(train.dtm, 0.95)
+test.dtm <- DocumentTermMatrix(reviews.all[-index.train],
+list(dictionary=dimnames(train.dtm)[[2]]))
 ```
 
-``` {r}
+Load Multinomial Bayes function
+```{r}
 train.mnb <- function (dtm,labels) {
   call <- match.call()
   V <- ncol(dtm)
@@ -78,4 +64,39 @@ predict.mnb <- function (model,dtm) {
     logprobs <- logprobs+matrix(nrow=N,ncol=nclass,log(model$prior),byrow=T)
     classlabels[max.col(logprobs)]
 }
+```
+
+
+logistic regression
+```{r}
+library(glmnet)
+mod2 <- cv.glmnet(as.matrix(train.dtm),labels[index.train],
+family="binomial",type.measure="class")
+plot(mod2)
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+# Unigrams
+# Modelling
+
+# Coding:
+# mod1 / p1 = Naive Bayes
+# mod2 / p2 = Regularized logistic regression 
+# mod3 / p3 = Classification trees
+# mod4 / p4 = Random forests
+# (mod / p) * 2 = bigrams
+
+mod1 <- train.mnb(as.matrix(train.dtm),labels[index.train])
+mod3 <- rpart(classlabel~., data=data.frame(as.matrix(train.dtm),classlabel=labels[index.train]), method="class")
+mod4 <- randomForest(label~., data=data.frame(as.matrix(train.dtm),label=labels[index.train]), mtry=sqrt(ncol(train.dtm)), ntree=100)
+
+# Predicting
+p1 <- predict.mnb(reviews.mnb,as.matrix(test.dtm))
+# make predictions on the test set
+p3<- predict(mod3,
+newdata=data.frame(as.matrix(test.dtm)),type="class")
+p4 <- predict(mod4, newdata = data.frame(as.matrix(test.dtm)), type = "class")
 ```
