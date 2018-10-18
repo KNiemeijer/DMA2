@@ -12,6 +12,7 @@ reviews.all <- c(reviews.decep, reviews.truth)
 labels <- c(rep(0,400),rep(1,400))
 ```
 
+# Preprocessing
 Preprocess the text corpus and create a document-term matrix
 ```{r}
 # Clean all reviews
@@ -26,12 +27,33 @@ reviews.all <- tm_map(reviews.all, stemDocument, language="english")
 # Set up dtm
 index.train <- c(1:320, 400 + 1:320)
 train.dtm <- DocumentTermMatrix(reviews.all[index.train])
-#train.dtm <- removeSparseTerms(train.dtm, 0.95)
 test.dtm <- DocumentTermMatrix(reviews.all[-index.train],
 list(dictionary=dimnames(train.dtm)[[2]]))
+
+# Removing Sparse terms
+train.sparse <- removeSparseTerms(train.dtm, 0.95)
+test.sparse <- DocumentTermMatrix(reviews.all[-index.train], 
+list(dictionary=dimnames(train.sparse)[[2]]))
+
+# Using Mutual Information
+library(entropy)
+train.mi <- apply(as.matrix(train.dtm), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
+train.mi.order <- order(train.mi,decreasing=T)
+# train.mi <- train.mi[train.mi.order[1:100]] # Use the top-100 features
+
+# Using tf-idf weights
+train2.dtm <- DocumentTermMatrix(reviews.all[index.train], 
+control=list(weighting=weightTfIdf))
+train2.dtm <- removeSparseTerms(train2.dtm,0.95)
+train3.dtm <- as.matrix(train.sparse)
+train3.dtm <- matrix(as.numeric(train3.dtm > 0),nrow=640,ncol=321)
+train3.idf <- apply(train3.dtm,2,sum)
+train3.idf <- log2(640/train3.idf)
+test3.dtm <- as.matrix(test.sparse)
+for(i in 1:321){test3.dtm[,i] <- test3.dtm[,i]*train3.idf[i]}
 ```
 
-Load Multinomial Bayes function
+# Load Multinomial Bayes function
 ```{r}
 train.mnb <- function (dtm,labels) {
   call <- match.call()
@@ -66,21 +88,13 @@ predict.mnb <- function (model,dtm) {
 }
 ```
 
-
-logistic regression
+# Modelling phase
 ```{r}
-library(glmnet)
-mod2 <- cv.glmnet(as.matrix(train.dtm),labels[index.train],
-family="binomial",type.measure="class")
-plot(mod2)
-```
-
-```{r, message=FALSE, warning=FALSE}
 library(rpart)
 library(rpart.plot)
 library(randomForest)
+library(glmnet)
 # Unigrams
-# Modelling
 
 # Coding:
 # mod1 / p1 = Naive Bayes
@@ -89,14 +103,117 @@ library(randomForest)
 # mod4 / p4 = Random forests
 # (mod / p) * 2 = bigrams
 
+# For all features
 mod1 <- train.mnb(as.matrix(train.dtm),labels[index.train])
-mod3 <- rpart(classlabel~., data=data.frame(as.matrix(train.dtm),classlabel=labels[index.train]), method="class")
-mod4 <- randomForest(label~., data=data.frame(as.matrix(train.dtm),label=labels[index.train]), mtry=sqrt(ncol(train.dtm)), ntree=100)
+mod2 <- cv.glmnet(as.matrix(train.dtm),labels[index.train],
+family="binomial",type.measure="class")
+mod3 <- rpart(classlabel~., data=data.frame(as.matrix(train.dtm), classlabel=labels[index.train]), method="class")
+mod4 <- randomForest(classlabel~., data=data.frame(as.matrix(train.dtm),classlabel=labels[index.train]), mtry=sqrt(ncol(train.dtm)), ntree=100)
 
-# Predicting
-p1 <- predict.mnb(reviews.mnb,as.matrix(test.dtm))
-# make predictions on the test set
+# Train sparse terms
+mod1.sparse <- train.mnb(as.matrix(train.sparse),labels[index.train])
+mod2.sparse <- cv.glmnet(as.matrix(train.sparse),labels[index.train],
+family="binomial",type.measure="class")
+mod3.sparse <- rpart(classlabel~., data=data.frame(as.matrix(train.sparse), classlabel=labels[index.train]), method="class")
+mod4.sparse <- randomForest(classlabel~., data=data.frame(as.matrix(train.sparse),classlabel=labels[index.train]), mtry=sqrt(ncol(train.sparse)), ntree=100)
+
+# Train mi terms
+mod1.mi <- train.mnb(as.matrix(train.dtm)[,train.mi.order[1:100]],labels[index.train])
+mod2.mi <- cv.glmnet(as.matrix(train.dtm)[,train.mi.order[1:100]],labels[index.train],
+family="binomial",type.measure="class")
+mod3.mi <- rpart(classlabel~., data=data.frame(as.matrix(train.dtm)[,train.mi.order[1:100]], classlabel=labels[index.train]), method="class")
+mod4.mi <- randomForest(classlabel~., data=data.frame(as.matrix(train.dtm)[,train.mi.order[1:100]],classlabel=labels[index.train]), mtry=sqrt(ncol(train.sparse)), ntree=100)
+
+# Using tf-idf weights
+mod2.tf <- cv.glmnet(as.matrix(train2.dtm),labels[index.train],
+family="binomial",type.measure="class")
+```
+
+# Prediction phase
+```{r}
+# For all terms
+p1 <- predict.mnb(mod1,as.matrix(test.dtm))
+p2 <- predict(mod2, newx=as.matrix(test.dtm),s="lambda.1se",type="class")
 p3<- predict(mod3,
 newdata=data.frame(as.matrix(test.dtm)),type="class")
 p4 <- predict(mod4, newdata = data.frame(as.matrix(test.dtm)), type = "class")
+p4 <- as.numeric(p4 > 0.5)
+
+# For sparse terms
+p1.sparse <- predict.mnb(mod1.sparse,as.matrix(test.sparse))
+p2.sparse <- predict(mod2.sparse, newx=as.matrix(test.sparse),s="lambda.1se",type="class")
+p3.sparse <- predict(mod3.sparse,
+newdata=data.frame(as.matrix(test.sparse)),type="class")
+p4.sparse <- predict(mod4.sparse, newdata = data.frame(as.matrix(test.sparse)), type = "class")
+p4.sparse <- as.numeric(p4.sparse > 0.5)
+
+# Using mi terms
+p1.mi <- predict.mnb(mod1.mi,as.matrix(test.dtm)[,train.mi.order[1:100]])
+p2.mi <- predict(mod2.mi, newx=as.matrix(test.dtm[,train.mi.order[1:100]]),s="lambda.1se",type="class")
+p3.mi <- predict(mod3.mi,
+newdata=data.frame(as.matrix(test.dtm)[,train.mi.order[1:100]]),type="class")
+p4.mi <- predict(mod4.mi, newdata = data.frame(as.matrix(test.dtm)[,train.mi.order[1:100]]), type = "class")
+p4.mi <- as.numeric(p4.mi > 0.5)
+
+# Using tf-idf weights
+p2.tf <- predict(mod2.tf,
+newx=test3.dtm,s="lambda.1se",type="class")
+```
+
+Compute fit
+```{r}
+metrics <- function(obs, pred) {
+  accuracy <- function(obs, pred){
+    sum(obs == pred) / length(obs)
+  }
+  acc <- accuracy(obs, pred)
+  TP <- sum(obs==1&pred==1)
+  FN <- sum(obs==1&pred==0)
+  TN <- sum(obs==0&pred==0)
+  FP <- sum(obs==0&pred==1)
+  sens <- TP/(FN+TP)
+  prec <- TP/(FP+TP)
+  recall <- TP/(FN+TP)
+  spec <- FP/(TN+FP)
+  
+  return(c(prec, recall, acc, sens, spec, 1-acc))
+
+  # cat("Accuracy is       ", acc, "\n")
+  # cat("Error rate is     ", 1-acc, "\n")
+  # cat("Sensitivity is    ", sens, "\n")
+  # cat("Recall is         ", recall, "\n")
+  # cat("Precision is      ", prec, "\n")
+  # cat("Specificity is    ", spec, "\n\n")
+  # table(pred,obs, dnn=c("Predicted class", "True class"))
+}
+
+results <- data.frame(matrix(nrow=0, ncol=8))
+colnames(results) <- c("Method", "Terms", "Precision", "Recall", "Accuracy", "Sensitvity", "Specificity", "Error rate")
+rownames(results) <- c()
+methods <- list("NB", "Log reg", "Tree", "RF")
+toMetrics <- list(p1,p2,p3,p4,p1.sparse,p2.sparse,p3.sparse,p4.sparse,p1.mi,p2.mi,p3.mi,p4.mi,p2.tf)
+ROCs <- list()
+for(i in 1:length(toMetrics)) {
+  results[i,1] <- methods[(i-1)%%4+1]
+  if(i %in% 1:4) results[i,2] <- "All"
+  if(i %in% 5:8) results[i,2] <- "Sparse"
+  if(i %in% 9:12) results[i,2] <- "Mi"
+  if(i == 13) results[i,2] <- "tf-idf"
+  results[i,3:8] <- metrics(toMetrics[[i]], labels[-index.train])
+  ROCs[[i]] <- assign(paste0("rocp", i), roc(labels[-index.train], as.numeric(toMetrics[[i]])))
+}
+
+# Plot accuracies
+results[13,1] <- methods[2]
+accuracies <- results$Accuracy
+for(i in 1:nrow(results)) { names(accuracies)[i] <- paste(results[i, 1], results[i, 2])} 
+plot(accuracies, type = 'h'); text(accuracies, names(accuracies), pos = 4)
+points(accuracies, pch = 16, cex = 2)
+
+# Plot AUCs
+AUCs <- sapply(ROCs, auc)
+for(i in 1:nrow(results)) { names(AUCs)[i] <- paste(results[i, 1], results[i, 2])} 
+plot(AUCs, type = 'h', xaxt='n', xlab = "", ylab = "AUC", xlim = c(0,13));
+points(AUCs, pch = 16, cex = 2)
+text(AUCs, names(AUCs), pos = 4)
 ```
