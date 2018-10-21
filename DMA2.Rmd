@@ -2,6 +2,11 @@
 title: "Data Mining Assignment 2"
 output: html_notebook
 ---
+# To do: 
+# 1. Perform CV on sparsity levels
+# 2. Perform CV on stemming / no stemming
+# 3. Fix broken functions
+
 
 Load the text files into memory
 ```{r}
@@ -37,20 +42,54 @@ list(dictionary=dimnames(train.sparse)[[2]]))
 
 # Using Mutual Information
 library(entropy)
-train.mi <- apply(as.matrix(train.dtm), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
+train.mi <- apply(as.matrix(train.sparse), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
 train.mi.order <- order(train.mi,decreasing=T)
-# train.mi <- train.mi[train.mi.order[1:100]] # Use the top-100 features
 
 # Using tf-idf weights
 train2.dtm <- DocumentTermMatrix(reviews.all[index.train], 
 control=list(weighting=weightTfIdf))
-train2.dtm <- removeSparseTerms(train2.dtm,0.95)
+train.tf <- removeSparseTerms(train2.dtm,0.95)
 train3.dtm <- as.matrix(train.sparse)
 train3.dtm <- matrix(as.numeric(train3.dtm > 0),nrow=640,ncol=321)
 train3.idf <- apply(train3.dtm,2,sum)
 train3.idf <- log2(640/train3.idf)
-test3.dtm <- as.matrix(test.sparse)
-for(i in 1:321){test3.dtm[,i] <- test3.dtm[,i]*train3.idf[i]}
+test.tf <- as.matrix(test.sparse)
+for(i in 1:321){test.tf[,i] <- test.tf[,i]*train3.idf[i]}
+
+# Bigrams
+library(RWeka)
+BigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 2, max = 2))
+train.bi.dtm <- DocumentTermMatrix(reviews.all[index.train], 
+control = list(tokenize = BigramTokenizer))
+
+train.bi <- cbind(as.matrix(train.dtm),as.matrix(train.bi.dtm)) # Merge unigrams and bigrams
+test.bi.dtm <- DocumentTermMatrix(reviews.all[-index.train],
+list(dictionary=dimnames(train.bi)[[2]]))
+test.bi <- as.matrix(test.bi.dtm)
+test.bi <- test.bi[,dimnames(train.bi)[[2]]]
+
+# Removing sparse terms
+train.bi.sparse <- removeSparseTerms(train.bi.dtm,0.99)
+train.bi.sparse <- cbind(as.matrix(train.sparse), as.matrix(train.bi.sparse)) # Merge unigrams and bigrams
+test.bi.dtm <- DocumentTermMatrix(reviews.all[-index.train],
+list(dictionary=dimnames(train.bi.sparse)[[2]]))
+test.bi.sparse <- as.matrix(test.bi.dtm)
+test.bi.sparse <- test.bi.sparse[,dimnames(train.bi.sparse)[[2]]]
+
+# Using mutual information
+train.bi.mi <- apply(as.matrix(train.bi.sparse), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
+train.bi.mi.order <- order(train.bi.mi,decreasing=T)
+
+# Using tf-idf weights
+train2.dtm <- DocumentTermMatrix(reviews.all[index.train], 
+control=list(weighting=weightTfIdf, tokenize = BigramTokenizer))
+train.bi.tf <- removeSparseTerms(train2.dtm,0.95)
+train3.dtm <- as.matrix(train.bi.sparse)
+train3.dtm <- matrix(as.numeric(train3.dtm > 0),nrow=640,ncol=782)
+train3.idf <- apply(train3.dtm,2,sum)
+train3.idf <- log2(782/train3.idf)
+test.bi.tf <- as.matrix(test.bi.sparse)
+for(i in 1:321){test.bi.tf[,i] <- test.bi.tf[,i]*train3.idf[i]}
 ```
 
 # Load Multinomial Bayes function
@@ -88,6 +127,73 @@ predict.mnb <- function (model,dtm) {
 }
 ```
 
+```{r}
+# Helper function for selecting lowest cp
+cp.select <- function(big.tree) {
+  min.x <- which.min(big.tree$cptable[, 4]) #column 4 is xerror
+  for(i in 1:nrow(big.tree$cptable)) {
+    if(big.tree$cptable[i, 4] < big.tree$cptable[min.x, 4] + big.tree$cptable[min.x, 5]) return(big.tree$cptable[i, 1]) #column 5: xstd, column 1: cp 
+  }
+}
+```
+
+```{r}
+createModels <- function(suffix, train, BiTrain, test) {
+  library(rpart)
+  library(rpart.plot)
+  library(randomForest)
+  library(glmnet)
+  if(suffix == ".mi") {
+    train <- as.matrix(train)[,train.mi.order[1:100]]
+    BiTrain <- as.matrix(BiTrain)[,train.bi.mi.order[1:100]]
+    test <- as.matrix(test)[,train.mi.order[1:100]]
+    BiTest <- as.matrix(test.bi.sparse)[,train.bi.mi.order[1:100]]
+  }
+  else 
+    BiTest <- get(paste0("test.bi", suffix))
+  # Modelling
+  cat("Model 1...\n")
+  assign(paste0("mod1", suffix), train.mnb(as.matrix(train),labels[index.train]),envir=.GlobalEnv)
+  cat("Model 2...\n")
+  assign(paste0("mod2", suffix), cv.glmnet(as.matrix(train), labels[index.train], family="binomial",type.measure="class"), envir=.GlobalEnv)
+  cat("Model 3...\n")
+  tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train), classlabel=labels[index.train]), cp=0, method="class")
+  assign(paste0("mod3", suffix), prune(tempTree, cp=cp.select(tempTree)),envir=.GlobalEnv)
+  cat("Model 4...\n")
+  assign(paste0("mod4", suffix), randomForest(classlabel~., data=data.frame(as.matrix(train),classlabel=labels[index.train]), mtry=sqrt(ncol(train.sparse)), ntree=100),envir=.GlobalEnv)
+  cat("Model 5...\n")
+  assign(paste0("mod5", suffix), train.mnb(as.matrix(BiTrain), labels[index.train]),envir=.GlobalEnv)
+  cat("Model 6...\n") 
+  assign(paste0("mod6", suffix), cv.glmnet(as.matrix(BiTrain), labels[index.train], family="binomial",type.measure="class"),envir=.GlobalEnv)
+   tempTree <- rpart(classlabel~.,data=data.frame(as.matrix(BiTrain),classlabel=labels[index.train]), cp=0, method="class")
+   cat("Model 7...\n") 
+  assign(paste0("mod7", suffix),prune(tempTree, cp=cp.select(tempTree)),envir=.GlobalEnv)
+  cat("Model 8...\n")
+  assign(paste0("mod8", suffix), randomForest(classlabel~., data=data.frame(as.matrix(BiTrain),classlabel=labels[index.train]), mtry=sqrt(ncol(BiTrain)), ntree=100),envir=.GlobalEnv)
+  
+  # Prediction
+  cat("Prediction 1...\n")
+  assign(paste0("p1", suffix), predict.mnb(get(paste0("mod1", suffix)), as.matrix(test)),envir=.GlobalEnv)
+  cat("prediction 2...\n")
+  assign(paste0("p2", suffix), predict(get(paste0("mod2", suffix)), newx=as.matrix(test),s="lambda.1se",type="class"),envir=.GlobalEnv)
+  cat("prediction 3...\n")
+  assign(paste0("p3", suffix), predict(get(paste0("mod3", suffix)), newdata=data.frame(as.matrix(test)),type="class"),envir=.GlobalEnv)
+  cat("prediction 4...\n")
+  pTemp <- predict(get(paste0("mod4", suffix)), newdata = data.frame(as.matrix(test)), type = "class")
+ assign(paste0("p4", suffix), as.numeric(pTemp > 0.5),envir=.GlobalEnv)
+ cat("prediction 5...\n")
+  assign(paste0("p5", suffix), predict.mnb(get(paste0("mod5", suffix)), as.matrix(BiTest)),envir=.GlobalEnv)
+  cat("prediction 6...\n")
+  assign(paste0("p6", suffix), predict(get(paste0("mod6", suffix)), newx=as.matrix(BiTest), s="lambda.1se", type="class"),envir=.GlobalEnv)
+  cat("prediction 7...\n")
+  assign(paste0("p7", suffix), predict(get(paste0("mod7", suffix)), newdata=data.frame(as.matrix(BiTest)), type="class"),envir=.GlobalEnv)
+  cat("prediction 8...\n")
+  pTemp <- predict(get(paste0("mod8", suffix)), newdata = data.frame(as.matrix(BiTest)), type = "class")
+  assign(paste0("p8", suffix), as.numeric(pTemp > 0.5),envir=.GlobalEnv)
+}
+
+``` 
+
 # Modelling phase
 ```{r}
 library(rpart)
@@ -103,30 +209,68 @@ library(glmnet)
 # mod4 / p4 = Random forests
 # (mod / p) * 2 = bigrams
 
+# createModels("", train.dtm, train.bi, test.dtm) # All features
+createModels(".sparse", train.sparse, train.bi.sparse, test.sparse) # Sparse features
+createModels(".mi", train.sparse, train.bi.sparse, test.sparse) # Mutual Information
+createModels(".tf", train.tf, train.bi.tf, test.tf) # tf-idf weights
+
 # For all features
 mod1 <- train.mnb(as.matrix(train.dtm),labels[index.train])
 mod2 <- cv.glmnet(as.matrix(train.dtm),labels[index.train],
 family="binomial",type.measure="class")
-mod3 <- rpart(classlabel~., data=data.frame(as.matrix(train.dtm), classlabel=labels[index.train]), method="class")
+mod3 <- rpart(classlabel~., data=data.frame(as.matrix(train.dtm), classlabel=labels[index.train]), cp=0, method="class")
+mod3 <- prune(mod3, cp=cp.select(mod3))
 mod4 <- randomForest(classlabel~., data=data.frame(as.matrix(train.dtm),classlabel=labels[index.train]), mtry=sqrt(ncol(train.dtm)), ntree=100)
+# Bigrams
+# mod5 <- train.mnb(as.matrix(train.bi),labels[index.train])
+# mod6 <- cv.glmnet(as.matrix(train.bi),labels[index.train],
+# family="binomial",type.measure="class")
+# mod7 <- rpart(classlabel~., data=data.frame(as.matrix(train.bi), classlabel=labels[index.train]), cp=0, method="class")
+# mod7 <- prune(mod7, cp.select(mod7))
+# mod8 <- randomForest(classlabel~., data=data.frame(as.matrix(train.bi),classlabel=labels[index.train]), mtry=sqrt(ncol(train.bi)), ntree=100) # Commented because of 45005 features
 
 # Train sparse terms
 mod1.sparse <- train.mnb(as.matrix(train.sparse),labels[index.train])
 mod2.sparse <- cv.glmnet(as.matrix(train.sparse),labels[index.train],
 family="binomial",type.measure="class")
-mod3.sparse <- rpart(classlabel~., data=data.frame(as.matrix(train.sparse), classlabel=labels[index.train]), method="class")
+mod3.sparse <- rpart(classlabel~., data=data.frame(as.matrix(train.sparse), classlabel=labels[index.train]), cp=0, method="class")
+mod3.sparse <- prune(mod3.sparse, cp=cp.select(mod3.sparse))
 mod4.sparse <- randomForest(classlabel~., data=data.frame(as.matrix(train.sparse),classlabel=labels[index.train]), mtry=sqrt(ncol(train.sparse)), ntree=100)
+# Bigrams
+mod5.sparse <- train.mnb(as.matrix(train.bi.sparse),labels[index.train])
+mod6.sparse <- cv.glmnet(as.matrix(train.bi.sparse),labels[index.train],
+family="binomial",type.measure="class")
+mod7.sparse <- rpart(classlabel~.,data=data.frame(as.matrix(train.bi.sparse),classlabel=labels[index.train]), cp=0, method="class")
+mod7.sparse <- prune(mod7.sparse, cp=cp.select(mod7.sparse))
+mod8.sparse <- randomForest(classlabel~.,data=data.frame(as.matrix(train.bi.sparse),classlabel=labels[index.train]), mtry=sqrt(ncol(train.bi.sparse)), ntree=100)
 
 # Train mi terms
 mod1.mi <- train.mnb(as.matrix(train.dtm)[,train.mi.order[1:100]],labels[index.train])
 mod2.mi <- cv.glmnet(as.matrix(train.dtm)[,train.mi.order[1:100]],labels[index.train],
 family="binomial",type.measure="class")
-mod3.mi <- rpart(classlabel~., data=data.frame(as.matrix(train.dtm)[,train.mi.order[1:100]], classlabel=labels[index.train]), method="class")
-mod4.mi <- randomForest(classlabel~., data=data.frame(as.matrix(train.dtm)[,train.mi.order[1:100]],classlabel=labels[index.train]), mtry=sqrt(ncol(train.sparse)), ntree=100)
+mod3.mi <- rpart(classlabel~.,data=data.frame(as.matrix(train.dtm)[,train.mi.order[1:100]], classlabel=labels[index.train]), cp=0,method="class")
+mod3.mi <- prune(mod3.mi, cp=cp.select(mod3.mi))
+mod4.mi <- randomForest(classlabel~.,data=data.frame(as.matrix(train.dtm)[,train.mi.order[1:100]],classlabel=labels[index.train]), mtry=sqrt(ncol(train.sparse)), ntree=100)
+mod5.mi <- train.mnb(as.matrix(train.bi.dtm)[,train.bi.mi.order[1:100]],labels[index.train])
+mod6.mi <- cv.glmnet(as.matrix(train.bi.dtm)[,train.bi.mi.order[1:100]],labels[index.train],
+family="binomial",type.measure="class")
+mod7.mi <- rpart(classlabel~.,data=data.frame(as.matrix(train.bi.sparse)[,train.bi.mi.order[1:100]], classlabel=labels[index.train]),cp=0,method="class")
+mod7.mi <- prune(mod7.mi, cp=cp.select(mod7.mi))
+mod8.mi <- randomForest(classlabel~., data=data.frame(as.matrix(train.bi.sparse)[,train.bi.mi.order[1:100]],classlabel=labels[index.train]), mtry=sqrt(ncol(train.bi.sparse)), ntree=100)
 
 # Using tf-idf weights
-mod2.tf <- cv.glmnet(as.matrix(train2.dtm),labels[index.train],
+mod1.tf <- train.mnb(as.matrix(train.tf), labels[index.train])
+mod2.tf <- cv.glmnet(as.matrix(train.tf),labels[index.train],
 family="binomial",type.measure="class")
+mod3.tf <- rpart(classlabel~., data=data.frame(as.matrix(train.tf), classlabel=labels[index.train]), cp=0, method="class")
+mod3.tf <- prune(mod3.sparse, cp=cp.select(mod3.sparse))
+mod4.tf <- randomForest(classlabel~., data=data.frame(as.matrix(train.sparse),classlabel=labels[index.train]), mtry=sqrt(ncol(train.sparse)), ntree=100)
+mod5.tf <- train.mnb(as.matrix(train.bi.tf),labels[index.train])
+mod6.tf <- cv.glmnet(as.matrix(train.tf),labels[index.train],
+family="binomial",type.measure="class")
+mod7.tf <- rpart(classlabel~.,data=data.frame(as.matrix(train.bi.tf),classlabel=labels[index.train]), cp=0, method="class")
+mod7.tf <- prune(mod7.tf, cp=cp.select(mod7.tf))
+mod8.tf <- randomForest(classlabel~.,data=data.frame(as.matrix(train.bi.tf),classlabel=labels[index.train]), mtry=sqrt(ncol(train.bi.tf)), ntree=100)
 ```
 
 # Prediction phase
@@ -138,6 +282,12 @@ p3<- predict(mod3,
 newdata=data.frame(as.matrix(test.dtm)),type="class")
 p4 <- predict(mod4, newdata = data.frame(as.matrix(test.dtm)), type = "class")
 p4 <- as.numeric(p4 > 0.5)
+# p5 <- predict.mnb(mod5,as.matrix(test.bi.dtm))
+# p6 <- predict(mod6, newx=as.matrix(test.bi.dtm),s="lambda.1se",type="class")
+# p7<- predict(mod7,
+# newdata=data.frame(as.matrix(test.bi.dtm)),type="class")
+# p8 <- predict(mod8, newdata = data.frame(as.matrix(test.bi.dtm)), type = "class")
+# p8 <- as.numeric(p8 > 0.5)
 
 # For sparse terms
 p1.sparse <- predict.mnb(mod1.sparse,as.matrix(test.sparse))
@@ -146,6 +296,12 @@ p3.sparse <- predict(mod3.sparse,
 newdata=data.frame(as.matrix(test.sparse)),type="class")
 p4.sparse <- predict(mod4.sparse, newdata = data.frame(as.matrix(test.sparse)), type = "class")
 p4.sparse <- as.numeric(p4.sparse > 0.5)
+p5.sparse <- predict.mnb(mod5.sparse,as.matrix(test.bi.sparse))
+p6.sparse <- predict(mod6.sparse, newx=as.matrix(test.bi.sparse),s="lambda.1se",type="class")
+p7.sparse <- predict(mod7.sparse,
+newdata=data.frame(as.matrix(test.bi.sparse)),type="class")
+p8.sparse <- predict(mod8.sparse, newdata = data.frame(as.matrix(test.bi.sparse)), type = "class")
+p8.sparse <- as.numeric(p8.sparse > 0.5)
 
 # Using mi terms
 p1.mi <- predict.mnb(mod1.mi,as.matrix(test.dtm)[,train.mi.order[1:100]])
@@ -154,10 +310,25 @@ p3.mi <- predict(mod3.mi,
 newdata=data.frame(as.matrix(test.dtm)[,train.mi.order[1:100]]),type="class")
 p4.mi <- predict(mod4.mi, newdata = data.frame(as.matrix(test.dtm)[,train.mi.order[1:100]]), type = "class")
 p4.mi <- as.numeric(p4.mi > 0.5)
+p5.mi <- predict.mnb(mod5.mi,as.matrix(test.bi.dtm)[,train.bi.mi.order[1:100]])
+p6.mi <- predict(mod6.mi, newx=as.matrix(test.bi.dtm[,train.bi.mi.order[1:100]]),s="lambda.1se",type="class")
+p7.mi <- predict(mod7.mi,
+newdata=data.frame(as.matrix(test.bi.sparse)[,train.bi.mi.order[1:100]]),type="class")
+p8.mi <- predict(mod8.mi, newdata = data.frame(as.matrix(test.bi.sparse)[,train.bi.mi.order[1:100]]), type = "class")
+p8.mi <- as.numeric(p4.mi > 0.5)
 
 # Using tf-idf weights
-p2.tf <- predict(mod2.tf,
-newx=test3.dtm,s="lambda.1se",type="class")
+p1.tf <- predict.mnb(mod1.tf, as.matrix(test.tf))
+p2.tf <- predict(mod2.tf, newx=test.tf,s="lambda.1se",type="class")
+p3.tf <- predict(mod3.tf, newdata=data.frame(as.matrix(test.tf)),type="class")
+p4.tf <- predict(mod4.tf, newdata = data.frame(as.matrix(test.tf)), type = "class")
+p4.tf <- as.numeric(p4.tf > 0.5)
+p5.tf <- predict.mnb(mod5.tf,as.matrix(test.bi.tf))
+p6.tf <- predict(mod6.tf, newx=test.bi.tf,s="lambda.1se",type="class")
+p7.tf <- predict(mod7.tf,
+newdata=data.frame(as.matrix(test.bi.tf)),type="class")
+p8.tf <- predict(mod8.tf, newdata = data.frame(as.matrix(test.bi.tf)), type = "class")
+p8.tf <- as.numeric(p8.tf > 0.5)
 ```
 
 Compute fit
@@ -166,6 +337,7 @@ metrics <- function(obs, pred) {
   accuracy <- function(obs, pred){
     sum(obs == pred) / length(obs)
   }
+  tryCatch(function(){
   acc <- accuracy(obs, pred)
   TP <- sum(obs==1&pred==1)
   FN <- sum(obs==1&pred==0)
@@ -176,7 +348,9 @@ metrics <- function(obs, pred) {
   recall <- TP/(FN+TP)
   spec <- FP/(TN+FP)
   
-  return(c(prec, recall, acc, sens, spec, 1-acc))
+  return(c(prec, recall, acc, sens, spec, 1-acc))},
+  error=return(c("", "", "", "", "", "")))
+  
 
   # cat("Accuracy is       ", acc, "\n")
   # cat("Error rate is     ", 1-acc, "\n")
@@ -186,34 +360,41 @@ metrics <- function(obs, pred) {
   # cat("Specificity is    ", spec, "\n\n")
   # table(pred,obs, dnn=c("Predicted class", "True class"))
 }
-
+library(pROC)
 results <- data.frame(matrix(nrow=0, ncol=8))
 colnames(results) <- c("Method", "Terms", "Precision", "Recall", "Accuracy", "Sensitvity", "Specificity", "Error rate")
 rownames(results) <- c()
 methods <- list("NB", "Log reg", "Tree", "RF")
-toMetrics <- list(p1,p2,p3,p4,p1.sparse,p2.sparse,p3.sparse,p4.sparse,p1.mi,p2.mi,p3.mi,p4.mi,p2.tf)
+ toMetrics <- list(p1,p2,p3,p4,p5,p6,p7,p8,p1.sparse,p2.sparse,p3.sparse,p4.sparse,p5.sparse,p6.sparse,p7.sparse,p8.sparse,p1.mi,p2.mi,p3.mi,p4.mi,p5.mi,p6.mi,p7.mi,p8.mi,p1.tf,p2.tf,p3.tf,p4.tf,p7.tf,p8.tf)
+# toMetrics <- list(p1.sparse,p2.sparse,p3.sparse,p4.sparse, p5.sparse, p6.sparse, p7.sparse, p8.sparse)
 ROCs <- list()
 for(i in 1:length(toMetrics)) {
   results[i,1] <- methods[(i-1)%%4+1]
-  if(i %in% 1:4) results[i,2] <- "All"
-  if(i %in% 5:8) results[i,2] <- "Sparse"
-  if(i %in% 9:12) results[i,2] <- "Mi"
-  if(i == 13) results[i,2] <- "tf-idf"
+  if(i %in% 1:8) results[i,2] <- "All"
+  if(i %in% 9:16) results[i,2] <- "Sparse"
+  if(i %in% 17:24) results[i,2] <- "Mi"
+  if(i %in% 25:30) results[i,2] <- "tf-idf"
   results[i,3:8] <- metrics(toMetrics[[i]], labels[-index.train])
-  ROCs[[i]] <- assign(paste0("rocp", i), roc(labels[-index.train], as.numeric(toMetrics[[i]])))
+ # ROCs[[i]] <- assign(paste0("rocp", i), roc(labels[-index.train], as.numeric(toMetrics[[i]])))
 }
 
 # Plot accuracies
-results[13,1] <- methods[2]
-accuracies <- results$Accuracy
-for(i in 1:nrow(results)) { names(accuracies)[i] <- paste(results[i, 1], results[i, 2])} 
-plot(accuracies, type = 'h'); text(accuracies, names(accuracies), pos = 4)
-points(accuracies, pch = 16, cex = 2)
-
-# Plot AUCs
-AUCs <- sapply(ROCs, auc)
-for(i in 1:nrow(results)) { names(AUCs)[i] <- paste(results[i, 1], results[i, 2])} 
-plot(AUCs, type = 'h', xaxt='n', xlab = "", ylab = "AUC", xlim = c(0,13));
-points(AUCs, pch = 16, cex = 2)
-text(AUCs, names(AUCs), pos = 4)
+# results[13,1] <- methods[2]
+# accuracies <- results$Accuracy
+# for(i in 1:nrow(results)) { names(accuracies)[i] <- paste(results[i, 1], results[i, 2])} 
+# plot(accuracies, type = 'h'); text(accuracies, names(accuracies), pos = 4)
+# points(accuracies, pch = 16, cex = 2)
+# 
+# # Plot AUCs
+# AUCs <- sapply(ROCs, auc)
+# for(i in 1:nrow(results)) { names(AUCs)[i] <- paste(results[i, 1], results[i, 2])} 
+# plot(AUCs, type = 'h', xaxt='n', xlab = "", ylab = "AUC", xlim = c(1,13));
+# points(AUCs, pch = 16, cex = 2)
+# text(AUCs, names(AUCs), pos = 4)
+# 
+# # Plot CPs
+# plotcp(mod3)
+# plotcp(mod3.sparse)
+# plotcp(mod6)
+# plotcp(mod6.sparse)
 ```
