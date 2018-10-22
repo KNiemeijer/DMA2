@@ -1,0 +1,338 @@
+---
+title: "DMA 2 V2"
+output: html_notebook
+---
+
+# Load the text files into memory
+```{r}
+library(tm)
+reviews.decep <- VCorpus(DirSource("C:/users/koenn/Google Drive/DM/Practical/DMA2/Reviews/deceptive", encoding="UTF-8", recursive=TRUE))
+reviews.truth <- VCorpus(DirSource("C:/users/koenn/Google Drive/DM/Practical/DMA2/Reviews/truthful", encoding="UTF-8", recursive=TRUE))
+reviews.all <- c(reviews.decep, reviews.truth)
+labels <- c(rep(0,400),rep(1,400))
+```
+
+# Preprocessing
+Preprocess the text corpus and create a document-term matrix
+```{r}
+# Clean all reviews
+reviews.all <- tm_map(reviews.all,removePunctuation)
+reviews.all <- tm_map(reviews.all,content_transformer(tolower))
+reviews.all <- tm_map(reviews.all, removeWords,
+stopwords("english"))
+reviews.all <- tm_map(reviews.all,removeNumbers)
+reviews.all <- tm_map(reviews.all,stripWhitespace)
+
+# Set up dtm
+index.train <- c(1:320, 400 + 1:320)
+train.dtm <- DocumentTermMatrix(reviews.all[index.train])
+test.dtm <- DocumentTermMatrix(reviews.all[-index.train],
+list(dictionary=dimnames(train.dtm)[[2]]))
+
+library(RWeka)
+BigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 2, max = 2))
+train.bi.dtm <- DocumentTermMatrix(reviews.all[index.train], 
+control = list(tokenize = BigramTokenizer))
+
+train.bi <- cbind(as.matrix(train.dtm),as.matrix(train.bi.dtm)) # Merge unigrams and bigrams
+test.bi.dtm <- DocumentTermMatrix(reviews.all[-index.train],
+list(dictionary=dimnames(train.bi)[[2]]))
+test.bi <- as.matrix(test.bi.dtm)
+test.bi <- test.bi[,dimnames(train.bi)[[2]]]
+```
+
+First, we set up some functions we need to create these models.
+
+```{r}
+train.mnb <- function (dtm,labels) {
+  call <- match.call()
+  V <- ncol(dtm)
+  N <- nrow(dtm)
+  prior <- table(labels)/N
+  labelnames <- names(prior)
+  nclass <- length(prior)
+  cond.probs <- matrix(nrow=V,ncol=nclass)
+  dimnames(cond.probs)[[1]] <- dimnames(dtm)[[2]]
+  dimnames(cond.probs)[[2]] <- labelnames
+  index <- list(length=nclass)
+  for(j in 1:nclass){
+    index[[j]] <- c(1:N)[labels == labelnames[j]]
+  }
+  
+  for(i in 1:V){
+    for(j in 1:nclass){
+      cond.probs[i,j] <- (sum(dtm[index[[j]],i])+1)/(sum(dtm[index[[j]],])+V)
+    }
+  }
+  list(call=call,prior=prior,cond.probs=cond.probs)    
+}
+
+predict.mnb <- function (model,dtm) {
+    classlabels <- dimnames(model$cond.probs)[[2]]
+    logprobs <- dtm %*% log(model$cond.probs)
+    N <- nrow(dtm)
+    nclass <- ncol(model$cond.probs)
+    logprobs <- logprobs+matrix(nrow=N,ncol=nclass,log(model$prior),byrow=T)
+    classlabels[max.col(logprobs)]
+}
+```
+
+```{r}
+# Helper function for selecting lowest cp
+cp.select <- function(big.tree) {
+  min.x <- which.min(big.tree$cptable[, 4]) #column 4 is xerror
+  for(i in 1:nrow(big.tree$cptable)) {
+    if(big.tree$cptable[i, 4] < big.tree$cptable[min.x, 4] + big.tree$cptable[min.x, 5]) return(big.tree$cptable[i, 1]) #column 5: xstd, column 1: cp 
+  }
+}
+```
+
+To save on effort, we write a reusable function.
+
+```{r}
+createModels <- function(suffix, train, BiTrain, test, BiTest, labels) {
+  library(rpart)
+  library(rpart.plot)
+  library(randomForest)
+  library(glmnet)
+  pred.cv <- list() # Set up list for predictions
+
+  assign(paste0("mod1", suffix), train.mnb(as.matrix(train),labels),envir=.GlobalEnv)
+
+  assign(paste0("mod2", suffix), cv.glmnet(as.matrix(train), labels, family="binomial",type.measure="class"), envir=.GlobalEnv)
+
+  tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train), classlabel=labels), cp=0, method="class")
+  assign(paste0("mod3", suffix), prune(tempTree, cp=cp.select(tempTree)),envir=.GlobalEnv)
+
+  assign(paste0("mod4", suffix), randomForest(classlabel~., data=data.frame(as.matrix(train),classlabel=labels), mtry=sqrt(ncol(train)), ntree=100),envir=.GlobalEnv)
+
+  assign(paste0("mod5", suffix), train.mnb(as.matrix(BiTrain), labels),envir=.GlobalEnv)
+
+  assign(paste0("mod6", suffix), cv.glmnet(as.matrix(BiTrain), labels, family="binomial",type.measure="class"),envir=.GlobalEnv)
+   tempTree <- rpart(classlabel~.,data=data.frame(as.matrix(BiTrain),classlabel=labels), cp=0, method="class")
+
+  assign(paste0("mod7", suffix),prune(tempTree, cp=cp.select(tempTree)),envir=.GlobalEnv)
+
+  assign(paste0("mod8", suffix), randomForest(classlabel~., data=data.frame(as.matrix(BiTrain),classlabel=labels), mtry=sqrt(ncol(BiTrain)), ntree=100),envir=.GlobalEnv)
+  
+  # Prediction
+  pred.cv[[1]] <- predict.mnb(get(paste0("mod1", suffix)), as.matrix(test))
+  pred.cv[[2]] <- predict(get(paste0("mod2", suffix)), newx=as.matrix(test),s="lambda.1se",type="class")
+  pred.cv[[3]] <- predict(get(paste0("mod3", suffix)), newdata=data.frame(as.matrix(test)),type="class")
+  pTemp <- predict(get(paste0("mod4", suffix)), newdata = data.frame(as.matrix(test)), type = "class")
+  pred.cv[[4]] <- as.numeric(pTemp > 0.5)
+  pred.cv[[5]] <- predict.mnb(get(paste0("mod5", suffix)), as.matrix(BiTest))
+  pred.cv[[6]] <- predict(get(paste0("mod6", suffix)), newx=as.matrix(BiTest), s="lambda.1se", type="class")
+  pred.cv[[7]] <- predict(get(paste0("mod7", suffix)), newdata=data.frame(as.matrix(BiTest)), type="class")
+  pTemp <- predict(get(paste0("mod8", suffix)), newdata = data.frame(as.matrix(BiTest)), type = "class")
+  pred.cv[[8]] <- as.numeric(pTemp > 0.5)
+  
+  return(pred.cv)
+}
+
+``` 
+
+Because we do not want to use all features (`dim(train.dtm)` is `[1]  640 6900`), we need to remove sparse features. That is, we remove features for the sparsity levels 0.90, 0.95, and 0.99. This means features that do not occur in, for instance, 99% of the documents get removed. We use 10-fold cross-validation to estimate the accuracy using the training set. We do not use the test set since we do not want to overfit on this test set which we'll need later. 
+
+# Sparsity
+```{r, warning=FALSE}
+set.seed(37729)
+k <- 10 #set the number of folds to 10
+accvec.sparse <- matrix(nrow=8, ncol=3)
+accvec.cv <- matrix(nrow=10, ncol=8)
+folds <- ceiling(runif(train.dtm$nrow, min = 0, max = k))
+accuracy <- function(obs, pred){
+  sum(obs == pred) / length(obs)
+}
+
+sparsity <- c(0.90, 0.95, 0.99)
+
+for(i in 1:length(sparsity)) {
+  cat("\nCalculating Sparsity level ", sparsity[i])
+  trainmat <- removeSparseTerms(train.dtm,sparsity[i])
+  trainmat.bi <- removeSparseTerms(train.bi.dtm, sparsity[i])
+  trainmat.bi <- cbind(as.matrix(trainmat),as.matrix(trainmat.bi))
+  trainmat <- as.matrix(trainmat) 
+  trainmat.bi <- as.matrix(trainmat.bi)
+  
+  for(j in 1:k) {
+    pred.cv <- createModels(suffix=substr(as.character(sparsity[i]),2,4), train=trainmat[folds!=j,], BiTrain=trainmat.bi[folds!=j,], test=trainmat[folds==j, ], BiTest=trainmat.bi[folds==j,], labels=(labels[index.train])[folds!=j])
+    
+    for(n in 1:length(pred.cv)) 
+      accvec.cv[j,n] <- accuracy(pred.cv[[n]], (labels[index.train])[folds==j])
+  }
+  accvec.sparse[,i] <- colMeans(accvec.cv)
+}
+rownames(accvec.sparse) <- c("NB", "Log reg", "Tree", "RF", "NB Bi", "Log reg Bi", "Tree Bi", "RF Bi")
+colnames(accvec.sparse) <- c(sparsity)
+accvec.sparse
+cat("\nBest sparsity level is ", sparsity[which.max(colMeans(accvec.sparse))],
+"with average accuracy = ", max(colMeans(accvec.sparse)))
+```
+
+# Stemming
+Obviously, a sparsity level of 0.99 gives us the highest average accuracy over the models (0.81). We will use this level of sparsity for the rest of this research. 
+
+Another interesting question we may pose is that whether we can improve performance by employing stemming. Similar to sparsity, we test this using 10-fold cross-validation and estimate its average accuracy on the training set. 
+
+```{r, warning=FALSE}
+# Set training data to correct sparsity level
+train.dtm <- removeSparseTerms(train.dtm, 0.99)
+test.dtm <- DocumentTermMatrix(reviews.all[-index.train],
+list(dictionary=dimnames(train.dtm)[[2]]))
+
+train.bi.dtm <- removeSparseTerms(train.bi.dtm, 0.99)
+train.bi.dtm <- cbind(as.matrix(train.bi.dtm), as.matrix(train.dtm))
+test.bi.dtm <- DocumentTermMatrix(reviews.all[-index.train],
+list(dictionary=dimnames(train.bi.dtm)[[2]]))
+test.bi.dtm <- as.matrix(test.bi.dtm)
+test.bi.dtm <- test.bi.dtm[,dimnames(train.bi.dtm)[[2]]]
+
+# Stem DocumentTermMatrices
+reviews.all.stem <- tm_map(reviews.all, stemDocument, language="english")
+
+train.stem <- DocumentTermMatrix(reviews.all.stem[index.train])
+train.stem <- removeSparseTerms(train.stem, 0.99)
+test.stem <- DocumentTermMatrix(reviews.all.stem[-index.train],
+list(dictionary=dimnames(train.stem)[[2]]))
+
+train.bi.stem <- DocumentTermMatrix(reviews.all.stem[index.train], 
+control = list(tokenize = BigramTokenizer))
+train.bi.stem <- removeSparseTerms(train.bi.stem, 0.99)
+train.bi.stem <- cbind(as.matrix(train.stem), as.matrix(train.bi.stem))
+test.bi.stem <- DocumentTermMatrix(reviews.all.stem[-index.train],
+list(dictionary=dimnames(train.bi.stem)[[2]]))
+test.bi.stem <- as.matrix(test.bi.stem)
+test.bi.stem <- test.bi.stem[,dimnames(train.bi.stem)[[2]]]
+
+set.seed(37729)
+k <- 10 #set the number of folds to 10
+accvec.stem <- matrix(nrow=8, ncol=2)
+accvec.cv <- matrix(nrow=10, ncol=8)
+folds <- ceiling(runif(train.dtm$nrow, min = 0, max = k))
+accuracy <- function(obs, pred){
+  sum(obs == pred) / length(obs)
+}
+
+compare <- list(train.dtm, train.bi.dtm, train.stem, train.bi.stem)
+i <- 1
+
+while(i <= 4) {
+  if(ceiling(i/2)==1) { cat("\nCalculating Non-stemming") }
+  else { cat("\nCalculating Stemming")}
+  trainmat <- as.matrix(compare[[i]])
+  trainmat.bi <- as.matrix(compare[[i+1]])
+  
+  for(j in 1:k) {
+    pred.cv <- createModels(suffix=".stem", train=trainmat[folds!=j,], BiTrain=trainmat.bi[folds!=j,], test=trainmat[folds==j, ], BiTest=trainmat.bi[folds==j,], labels=(labels[index.train])[folds!=j])
+    
+    for(n in 1:length(pred.cv)) 
+      accvec.cv[j,n] <- accuracy(pred.cv[[n]], (labels[index.train])[folds==j])
+  }
+  accvec.stem[,ceiling(i/2)] <- colMeans(accvec.cv)
+  i <- i+2
+}
+rownames(accvec.stem) <- c("NB", "Log reg", "Tree", "RF", "NB Bi", "Log reg Bi", "Tree Bi", "RF Bi")
+colnames(accvec.stem) <- c("No Stemming", "Stemming")
+print("\n",accvec.stem)
+cat("\nThe best model is ", which.max(colMeans(accvec.stem)),
+"(1 = no stemming, 2 = stemming) with average accuracy = ", max(colMeans(accvec.stem)))
+```
+
+So, applying stemming is slightly better than when we don't apply stemming. A further improvement we might make is to look at the mutual information index of words. 
+
+# Mutual Information
+Mutual information (MI) of two random variables is a measure of the mutual dependence between the two variables. More specifically, it quantifies the "amount of information" obtained about one random variable through observing the other random variable. We compare the top 200, top 100, top 50, and top 25 to see which one performs best using 10-fold CV. Although stemming did not prove to improve all methods, the differences are close and they also do not seem to hurt the improvement. Especially for logistic regression, stemming is an improvement and we will therefore use it when calculating mutual information. 
+
+```{r, warning=FALSE}
+# Apply stemming to data
+train.dtm <- train.stem
+train.bi.dtm <- train.bi.stem
+
+set.seed(37729)
+k <- 10 #set the number of folds to 10
+accvec.mi <- matrix(nrow=8, ncol=7)
+accvec.cv <- matrix(nrow=10, ncol=8)
+folds <- ceiling(runif(train.dtm$nrow, min = 0, max = k))
+accuracy <- function(obs, pred){
+  sum(obs == pred) / length(obs)
+}
+
+mi <- c(25, 50, 100, 200, 300, 400, 500)
+
+library(entropy)
+
+for(i in 1:length(mi)) {
+  cat("\nCalculating Mutual information top ", mi[i])
+  train.mi <- apply(as.matrix(train.dtm), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
+  train.mi.order <- order(train.mi,decreasing=T)
+  train.bi.mi <- apply(as.matrix(train.bi.dtm), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
+  train.bi.mi.order <- order(train.bi.mi,decreasing=T)
+
+  for(j in 1:k) {
+    pred.cv <- createModels(suffix=".mi", train=(as.matrix(train.dtm)[,train.mi.order[1:mi[i]]])[folds!=j,], BiTrain=(as.matrix(train.bi.dtm)[,train.bi.mi.order[1:mi[i]]])[folds!=j,], test=(as.matrix(train.dtm)[,train.mi.order[1:mi[i]]])[folds==j, ], BiTest=(as.matrix(train.bi.dtm)[,train.bi.mi.order[1:mi[i]]])[folds==j,], labels=(labels[index.train])[folds!=j])
+    
+    for(n in 1:length(pred.cv)) 
+      accvec.cv[j,n] <- accuracy(pred.cv[[n]], (labels[index.train])[folds==j])
+  }
+  accvec.mi[,i] <- colMeans(accvec.cv)
+}
+rownames(accvec.mi) <- c("NB", "Log reg", "Tree", "RF", "NB Bi", "Log reg Bi", "Tree Bi", "RF Bi")
+colnames(accvec.mi) <- c(mi)
+accvec.mi
+cat("Best mutual information level is top", mi[which.max(colMeans(accvec.mi))],
+"with average accuracy = ", max(colMeans(accvec.mi)))
+```
+
+It looks like for most features using the top 300 features based on mutual information provides the most improvement. We try one more possible improvement before comparing the results to check which algorithms work best with which feature selection.
+
+# TF-IDF
+```{r, warning=FALSE}
+set.seed(37729)
+k <- 10 #set the number of folds to 10
+accvec.tf <- matrix(nrow=8, ncol=1)
+accvec.cv <- matrix(nrow=10, ncol=8)
+folds <- ceiling(runif(train.dtm$nrow, min = 0, max = k))
+accuracy <- function(obs, pred){
+  sum(obs == pred) / length(obs)
+}
+
+train.tf <- DocumentTermMatrix(reviews.all[index.train], 
+control=list(weighting=weightTfIdf))
+train.tf <- removeSparseTerms(train.tf,0.99) # Use the sparsity level as selected before
+train.mat <- as.matrix(train.dtm)
+nRows <- nrow(train.mat)
+nCols <- ncol(train.mat)
+train.mat <- matrix(as.numeric(train.mat > 0),nrow=nRows,ncol=nCols)
+train.idf <- apply(train.mat,2,sum)
+train.idf <- log2(nRows/train.idf)
+test.tf <- as.matrix(test.dtm) # Use training data instead of test data
+for(i in 1:1114){test.tf[,i] <- test.tf[,i]*train.idf[i]}
+
+train.bi.tf <-  DocumentTermMatrix(reviews.all[index.train], 
+control=list(weighting=weightTfIdf, tokenize = BigramTokenizer))
+train.bi.tf <- removeSparseTerms(train.bi.tf,0.99)
+train.bi.mat <- as.matrix(train.bi.dtm)
+nRows <- nrow(train.bi.mat)
+nCols <- ncol(train.bi.mat)
+train.bi.mat <- matrix(as.numeric(train.bi.mat > 0),nrow=nRows,ncol=nCols)
+train.bi.idf <- apply(train.bi.mat,2,sum)
+train.bi.idf <- log2(nRows/train.bi.idf)
+test.bi.tf <- as.matrix(test.bi.dtm) # Use training instead of test data
+for(i in 1:1575){test.bi.tf[,i] <- test.bi.tf[,i]*train.bi.idf[i]}
+
+for(j in 1:k) {
+   pred.cv <- createModels(suffix=".tf", train=train.tf[folds!=j,], BiTrain=train.bi.tf[folds!=j,], test=test.tf[folds==j,], BiTest=train.bi.tf[folds==j,], labels=(labels[index.train])[folds!=j])
+  
+  for(n in 1:length(pred.cv)) 
+    accvec.cv[j,n] <- accuracy(pred.cv[[n]], (labels[index.train])[folds==j])
+}
+accvec.tf[,i] <- colMeans(accvec.cv)
+
+rownames(accvec.tf) <- c("NB", "Log reg", "Tree", "RF", "NB Bi", "Log reg Bi", "Tree Bi", "RF Bi")
+colnames(accvec.tf) <- "TF-IDF"
+accvec.tf
+cat("Best mutual information level is top", which.max(colMeans(accvec.tf)), "with average accuracy = ", max(colMeans(accvec.tf)))
+```
+
+
