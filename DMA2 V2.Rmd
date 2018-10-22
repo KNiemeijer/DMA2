@@ -5,6 +5,7 @@ output: html_notebook
 
 # Load the text files into memory
 ```{r}
+time.start <- Sys.time()
 library(tm)
 reviews.decep <- VCorpus(DirSource("C:/users/koenn/Google Drive/DM/Practical/DMA2/Reviews/deceptive", encoding="UTF-8", recursive=TRUE))
 reviews.truth <- VCorpus(DirSource("C:/users/koenn/Google Drive/DM/Practical/DMA2/Reviews/truthful", encoding="UTF-8", recursive=TRUE))
@@ -168,6 +169,8 @@ colnames(accvec.sparse) <- c(sparsity)
 accvec.sparse
 cat("\nBest sparsity level is ", sparsity[which.max(colMeans(accvec.sparse))],
 "with average accuracy = ", max(colMeans(accvec.sparse)))
+library(ggplot2)
+ggplot() + labs(x = "Sparsity level", y = "Accuracy") + scale_discrete_identity(as.factor(sparsity)) + geom_line(aes(sparsity, colMeans(accvec.sparse))) + geom_point(aes(sparsity,colMeans(accvec.sparse))) + geom_abline(colour="Red", slope=0, intercept=max(colMeans(accvec.sparse)))
 ```
 
 # Stemming
@@ -234,9 +237,10 @@ while(i <= 4) {
 }
 rownames(accvec.stem) <- c("NB", "Log reg", "Tree", "RF", "NB Bi", "Log reg Bi", "Tree Bi", "RF Bi")
 colnames(accvec.stem) <- c("No Stemming", "Stemming")
-print("\n",accvec.stem)
+print(accvec.stem)
 cat("\nThe best model is ", which.max(colMeans(accvec.stem)),
 "(1 = no stemming, 2 = stemming) with average accuracy = ", max(colMeans(accvec.stem)))
+accvec.stem
 ```
 
 So, applying stemming is slightly better than when we don't apply stemming. A further improvement we might make is to look at the mutual information index of words. 
@@ -261,13 +265,13 @@ accuracy <- function(obs, pred){
 mi <- c(25, 50, 100, 200, 300, 400, 500)
 
 library(entropy)
+train.mi <- apply(as.matrix(train.dtm), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
+train.mi.order <- order(train.mi,decreasing=T)
+train.bi.mi <- apply(as.matrix(train.bi.dtm), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
+train.bi.mi.order <- order(train.bi.mi,decreasing=T)
 
 for(i in 1:length(mi)) {
   cat("\nCalculating Mutual information top ", mi[i])
-  train.mi <- apply(as.matrix(train.dtm), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
-  train.mi.order <- order(train.mi,decreasing=T)
-  train.bi.mi <- apply(as.matrix(train.bi.dtm), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
-  train.bi.mi.order <- order(train.bi.mi,decreasing=T)
 
   for(j in 1:k) {
     pred.cv <- createModels(suffix=".mi", train=(as.matrix(train.dtm)[,train.mi.order[1:mi[i]]])[folds!=j,], BiTrain=(as.matrix(train.bi.dtm)[,train.bi.mi.order[1:mi[i]]])[folds!=j,], test=(as.matrix(train.dtm)[,train.mi.order[1:mi[i]]])[folds==j, ], BiTest=(as.matrix(train.bi.dtm)[,train.bi.mi.order[1:mi[i]]])[folds==j,], labels=(labels[index.train])[folds!=j])
@@ -282,9 +286,10 @@ colnames(accvec.mi) <- c(mi)
 accvec.mi
 cat("Best mutual information level is top", mi[which.max(colMeans(accvec.mi))],
 "with average accuracy = ", max(colMeans(accvec.mi)))
+ggplot() + labs(x = "Number of features", y = "Accuracy") + scale_discrete_identity(as.factor(mi)) + geom_line(aes(mi, colMeans(accvec.mi))) + geom_point(aes(mi,colMeans(accvec.mi))) + geom_abline(colour="Red", slope=0, intercept=max(colMeans(accvec.mi)))
 ```
 
-It looks like for most features using the top 300 features based on mutual information provides the most improvement. We try one more possible improvement before comparing the results to check which algorithms work best with which feature selection.
+It looks like for most features using the top 500 features based on mutual information provides the most improvement. That said, the slope of the line flattens out after 300 features and more than 500 is not likely to create more accurate models. We try one more possible improvement before comparing the results to check which algorithms work best with which feature selection.
 
 # TF-IDF
 ```{r, warning=FALSE}
@@ -297,8 +302,8 @@ accuracy <- function(obs, pred){
   sum(obs == pred) / length(obs)
 }
 
-train.tf <- DocumentTermMatrix(reviews.all[index.train], 
-control=list(weighting=weightTfIdf))
+train.tf <- DocumentTermMatrix(reviews.all.stem[index.train], 
+control=list(weighting=weightTfIdf)) # Use stemmed data due to size differences with test set
 train.tf <- removeSparseTerms(train.tf,0.99) # Use the sparsity level as selected before
 train.mat <- as.matrix(train.dtm)
 nRows <- nrow(train.mat)
@@ -306,10 +311,10 @@ nCols <- ncol(train.mat)
 train.mat <- matrix(as.numeric(train.mat > 0),nrow=nRows,ncol=nCols)
 train.idf <- apply(train.mat,2,sum)
 train.idf <- log2(nRows/train.idf)
-test.tf <- as.matrix(test.dtm) # Use training data instead of test data
+test.tf <- as.matrix(train.dtm) # Use training data instead of test data
 for(i in 1:1114){test.tf[,i] <- test.tf[,i]*train.idf[i]}
 
-train.bi.tf <-  DocumentTermMatrix(reviews.all[index.train], 
+train.bi.tf <-  DocumentTermMatrix(reviews.all.stem[index.train], 
 control=list(weighting=weightTfIdf, tokenize = BigramTokenizer))
 train.bi.tf <- removeSparseTerms(train.bi.tf,0.99)
 train.bi.mat <- as.matrix(train.bi.dtm)
@@ -318,7 +323,7 @@ nCols <- ncol(train.bi.mat)
 train.bi.mat <- matrix(as.numeric(train.bi.mat > 0),nrow=nRows,ncol=nCols)
 train.bi.idf <- apply(train.bi.mat,2,sum)
 train.bi.idf <- log2(nRows/train.bi.idf)
-test.bi.tf <- as.matrix(test.bi.dtm) # Use training instead of test data
+test.bi.tf <- as.matrix(train.bi.dtm) # Use training instead of test data
 for(i in 1:1575){test.bi.tf[,i] <- test.bi.tf[,i]*train.bi.idf[i]}
 
 for(j in 1:k) {
@@ -327,12 +332,79 @@ for(j in 1:k) {
   for(n in 1:length(pred.cv)) 
     accvec.cv[j,n] <- accuracy(pred.cv[[n]], (labels[index.train])[folds==j])
 }
-accvec.tf[,i] <- colMeans(accvec.cv)
+accvec.tf[,1] <- colMeans(accvec.cv)
 
 rownames(accvec.tf) <- c("NB", "Log reg", "Tree", "RF", "NB Bi", "Log reg Bi", "Tree Bi", "RF Bi")
 colnames(accvec.tf) <- "TF-IDF"
 accvec.tf
-cat("Best mutual information level is top", which.max(colMeans(accvec.tf)), "with average accuracy = ", max(colMeans(accvec.tf)))
+cat("Average accuracy = ", max(colMeans(accvec.tf)))
 ```
 
+Okay that isn't much of an improvement. Now that we have calculated different forms of feature selection, we do a side-by-side comparision and select the best of of feature selection applicable to a specific model before validating this model on the test set.
 
+# Comparison of Feature Selection
+```{r}
+mod.mat <- cbind(accvec.sparse, accvec.stem, accvec.mi, accvec.tf)
+for(i in 1:nrow(mod.mat)) {
+  cat("\nAccuracy for ", rownames(mod.mat)[i], "\n")
+  print(as.matrix((mod.mat[i,])[order(mod.mat[i,], decreasing=T)]))
+}
+```
+
+Based on these results, we can draw the follow inferences:
+* Naive Bayes: Non-stemming gives an improvement over stemming. Additonally, the top-300 features based on mutual information give the higher accuracy of 0.8880763. We will combine these two to see if this indeed performs better.
+* Logistic regression: As concluded before, stemming seems to give a small improvement in comparison to non-stemmed features. The top-200 features based on mutual information give the higher accuracy of 0.8702152.
+* Decision tree: Interestingly, a single decision tree seems to work abysmally in comparison to the other methods. Also unlike the other methods, a decision tree seems to work best when either all the non-stemmed features are used or when only when the top-25 features are used based on mutual information. We will combine these two just to be sure.
+* Random forests: Fortunately, random forests perform much better than just a single tree. The top-500 features with stemming seems most promising and so we will put this to the test in the next session. 
+* Naive Bayes with uni- and bigrams: The top-300 features seem to hit the mark when using NB. Since non-stemmed features perform slightly better, we will have to see if a combination of the two provides an improvement.
+* Logistic regression with uni- and bigrams: Similar to logistic regression with only unigrams, this algorithm with bigrams performs best with stemmed features. This time the top 300 is used instead.
+* Decision tree with uni- and bigrams: The results for this algorithm is inconclusive. On the one hand, features with a sparsity level of $<0.99$ seem to performed best, but this should of course be equivalent to the results of 'no stemming' since no stemming was used when calculating the sparsity levels. However, the results also show that stemming performs better than no stemming. Consequently, we will validate these results in the next section by using both stemming and a sparsity level of 0.99.
+* Random forests with uni- and bigrams: Similar to random forests with only unigrams, the top-500 features with stemming seems most promising.
+
+Now we make a comparison after which we select our final models. This time, however, we use bootstrap CV instead of 10-fold so to not bias our results.
+
+```{r}
+time.start <- Sys.time()
+best.mat <- matrix(ncol=1, nrow=8)
+for(i in 1:nrow(mod.mat)) {
+  best.mat[i,] <- max(mod.mat[i,])
+}
+rownames(best.mat) <- rownames(mod.mat)
+colnames(best.mat) <- "Old Accuracy"
+newbest <- numeric(8)
+
+# First, we set up the data we need
+
+# Tree bi: sparsity 0.99, stem
+set.seed(37729)
+k <- 10 #set the number of folds to 10
+accvec.bs <- rep(0, k)
+folds <- ceiling(runif(nrow(train.bi.dtm), min = 0, max = k))
+accuracy <- function(obs, pred){
+  sum(obs == pred) / length(obs)
+}
+
+# for(j in 1:k) {
+#   tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train.bi.dtm)[folds!=j,], classlabel=(labels[index.train])[folds!=j]), cp=0, method="class") #train on all but fold j
+#   mod <- prune(tempTree, cp=cp.select(tempTree)) # Select best CP
+#   pred <- predict(mod, newdata = data.frame(as.matrix(train.bi.dtm)[folds==j,]), type="class") #validate on fold j
+#   accvec.bs[j] <- accuracy((labels[index.train])[folds==j], pred)
+# }
+# newbest[3] <- mean(accvec.bs)
+
+# Log: mi 200, stem -> No need to train!
+
+# RF: mi 500, stem
+# RF bi: mi 500, stem
+# Log bi: mi 300, stem
+
+# Now for non-stemmed data
+# NB: mi 300, non-stem
+# NB bi: mi 300, non-stem
+# Tree: mi 25, non-stem
+
+
+time.stop <- Sys.time()
+```
+
+Check to see if they have indeed improved!
