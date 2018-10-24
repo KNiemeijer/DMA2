@@ -105,7 +105,7 @@ createModels <- function(suffix, train, BiTrain, test, BiTest, labels) {
   tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train), classlabel=labels), cp=0, method="class")
   assign(paste0("mod3", suffix), prune(tempTree, cp=cp.select(tempTree)),envir=.GlobalEnv)
 
-  assign(paste0("mod4", suffix), randomForest(classlabel~., data=data.frame(as.matrix(train),classlabel=labels), mtry=sqrt(ncol(train)), ntree=100),envir=.GlobalEnv)
+  assign(paste0("mod4", suffix), randomForest(as.factor(classlabel)~., data=data.frame(as.matrix(train),classlabel=labels), mtry=sqrt(ncol(train)), ntree=100),envir=.GlobalEnv)
 
   assign(paste0("mod5", suffix), train.mnb(as.matrix(BiTrain), labels),envir=.GlobalEnv)
 
@@ -141,7 +141,7 @@ set.seed(37729)
 k <- 10 #set the number of folds to 10
 accvec.sparse <- matrix(nrow=8, ncol=3)
 accvec.cv <- matrix(nrow=10, ncol=8)
-folds <- ceiling(runif(train.dtm$nrow, min = 0, max = k))
+folds <- createFolds(1:train.dtm$nrow, k=k, list=FALSE)
 accuracy <- function(obs, pred){
   sum(obs == pred) / length(obs)
 }
@@ -208,11 +208,11 @@ list(dictionary=dimnames(train.bi.stem)[[2]]))
 test.bi.stem <- as.matrix(test.bi.stem)
 test.bi.stem <- test.bi.stem[,dimnames(train.bi.stem)[[2]]]
 
-set.seed(37729)
+set.seed(56161)
 k <- 10 #set the number of folds to 10
 accvec.stem <- matrix(nrow=8, ncol=2)
 accvec.cv <- matrix(nrow=10, ncol=8)
-folds <- ceiling(runif(train.dtm$nrow, min = 0, max = k))
+folds <- createFolds(1:train.dtm$nrow, k=k, list=FALSE)
 accuracy <- function(obs, pred){
   sum(obs == pred) / length(obs)
 }
@@ -240,7 +240,6 @@ colnames(accvec.stem) <- c("No Stemming", "Stemming")
 print(accvec.stem)
 cat("\nThe best model is ", which.max(colMeans(accvec.stem)),
 "(1 = no stemming, 2 = stemming) with average accuracy = ", max(colMeans(accvec.stem)))
-accvec.stem
 ```
 
 So, applying stemming is slightly better than when we don't apply stemming. A further improvement we might make is to look at the mutual information index of words. 
@@ -253,11 +252,11 @@ Mutual information (MI) of two random variables is a measure of the mutual depen
 # train.dtm <- train.stem
 # train.bi.dtm <- train.bi.stem
 
-set.seed(37729)
+set.seed(12548)
 k <- 10 #set the number of folds to 10
 accvec.mi <- matrix(nrow=8, ncol=7)
 accvec.cv <- matrix(nrow=10, ncol=8)
-folds <- ceiling(runif(train.stem$nrow, min = 0, max = k))
+folds <- createFolds(1:train.dtm$nrow, k=k, list=FALSE)
 accuracy <- function(obs, pred){
   sum(obs == pred) / length(obs)
 }
@@ -300,11 +299,11 @@ It looks like for most features using the top 500 features based on mutual infor
 
 # TF-IDF
 ```{r, warning=FALSE}
-set.seed(37729)
+set.seed(26745)
 k <- 10 #set the number of folds to 10
 accvec.tf <- matrix(nrow=8, ncol=1)
 accvec.cv <- matrix(nrow=10, ncol=8)
-folds <- ceiling(runif(train.stem$nrow, min = 0, max = k))
+folds <- createFolds(1:train.dtm$nrow, k=k, list=FALSE)
 accuracy <- function(obs, pred){
   sum(obs == pred) / length(obs)
 }
@@ -376,7 +375,7 @@ for(i in 1:nrow(mod.mat)) {
   best.mat[i,] <- max(mod.mat[i,])
 }
 newbest <- numeric(8)
-newbest[c(2,4,6,7,8)] <- best.mat[c(2,4,6,7,8),1]
+newbest[c(2,3,4,6,7,8)] <- best.mat[c(2,3,4,6,7,8),1]
 
 # First, we set up the data we need
 
@@ -402,18 +401,18 @@ train.bi.mi.order <- order(train.bi.mi,decreasing=T)
 set.seed(37729)
 k <- 10 #set the number of folds to 10
 accvec.bs <- rep(0, k)
-folds <- ceiling(runif(nrow(train.dtm), min = 0, max = k))
+folds <- createFolds(1:train.dtm$nrow, k=k, list=FALSE)
 accuracy <- function(obs, pred){
   sum(obs == pred) / length(obs)
 }
 # Tree: mi 25, non-stem
-for(j in 1:k) {
-  tempTree <- rpart(classlabel~., data=data.frame((as.matrix(train.dtm)[,train.mi.nostem.order[1:20]])[folds!=j,], classlabel=(labels[index.train])[folds!=j]), cp=0, method="class") #train on all but fold j
-  mod <- prune(tempTree, cp=cp.select(tempTree)) # Select best CP
-  pred <- predict(mod, newdata = data.frame((as.matrix(train.dtm)[,train.mi.nostem.order[1:20]])[folds==j,]), type="class") #validate on fold j
-  accvec.bs[j] <- accuracy((labels[index.train])[folds==j], pred)
-}
-newbest[3] <- mean(accvec.bs)
+# for(j in 1:k) {
+#   tempTree <- rpart(classlabel~., data=data.frame((as.matrix(train.dtm)[,train.mi.nostem.order[1:20]])[folds!=j,], classlabel=(labels[index.train])[folds!=j]), cp=0, method="class") #train on all but fold j
+#   mod <- prune(tempTree, cp=cp.select(tempTree)) # Select best CP
+#   pred <- predict(mod, newdata = data.frame((as.matrix(train.dtm)[,train.mi.nostem.order[1:20]])[folds==j,]), type="class") #validate on fold j
+#   accvec.bs[j] <- accuracy((labels[index.train])[folds==j], pred)
+# }
+# newbest[3] <- mean(accvec.bs)
 
 # NB: mi 300, non-stem
 for(j in 1:k) {
@@ -423,10 +422,10 @@ for(j in 1:k) {
 }
 newbest[1] <- mean(accvec.bs)
 
-# NB bi: mi 300, non-stem
+# NB bi: mi 400, non-stem
 for(j in 1:k) {
-  mod<- train.mnb((train.bi[,train.bi.mi.order[1:300]])[folds!=j,], (labels[index.train])[folds!=j]) #train on all but fold j 
-  pred <- predict.mnb(mod, (train.bi[,train.bi.mi.order[1:300]])[folds==j,]) #validate on fold j
+  mod<- train.mnb((train.bi[,train.bi.mi.order[1:400]])[folds!=j,], (labels[index.train])[folds!=j]) #train on all but fold j 
+  pred <- predict.mnb(mod, (train.bi[,train.bi.mi.order[1:400]])[folds==j,]) #validate on fold j
   accvec.bs[j] <- accuracy((labels[index.train])[folds==j], pred)
 }
 newbest[5] <- mean(accvec.bs)
@@ -434,6 +433,7 @@ newbest[5] <- mean(accvec.bs)
 best.mat <- cbind(best.mat, newbest)
 rownames(best.mat) <- rownames(mod.mat)
 colnames(best.mat) <- c("Old Accuracy", "New Accuracy")
+best.mat
 ```
 
 The results for a single decision tree are disappointing. Interestingly, Naive Bayes with uni- and bigrams seems to still score slightly below its previous highest accuracy for which it used the top-300 stemmed features based on mutual information. The only model that has improved is naive with unigrams. Therefore, we will use this new model.
@@ -441,35 +441,33 @@ The results for a single decision tree are disappointing. Interestingly, Naive B
 # Final Testing of the Models
 ```{r}
 # mod1 mi 300 no stem
-# mod2 mi 200 stem
-# mod3 no stemming
-# mod4 mi 500 stem
-# mod5 mi 300 stem
-# mod6 mi 300 stem
-# mod7 sparse no stem
-# mod8 mi 500 stem
+# mod2 mi 100 stem
+# mod3 mi 25  stem
+# mod4 mi 200 stem
+# mod5 mi 400 stem
+# mod6 mi 200 stem
+# mod7 sparse stem
+# mod8 mi 400 stem
 
 mod1 <- train.mnb(as.matrix(train.dtm)[,train.mi.nostem.order[1:300]], labels[index.train])
-mod2 <- cv.glmnet(as.matrix(train.stem)[,train.mi.order[1:200]], labels[index.train], alpha=1, family="binomial",type.measure="class")
-tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train.dtm), classlabel=labels[index.train]), cp=0, method="class")
+mod2 <- cv.glmnet(as.matrix(train.stem)[,train.mi.order[1:100]], labels[index.train], alpha=1, family="binomial",type.measure="class")
+tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train.stem)[,train.mi.order[1:25]], classlabel=labels[index.train]), cp=0, method="class")
 mod3 <- prune(tempTree, cp=cp.select(tempTree))
-mod4 <- randomForest(classlabel~., data=data.frame(as.matrix(train.stem)[,train.mi.order[1:500]], classlabel=labels[index.train]), mtry=sqrt(ncol(train.stem)), ntree=100)
-mod5 <- train.mnb(as.matrix(train.bi.stem), labels[index.train])
-mod6 <- cv.glmnet(as.matrix(train.bi.stem)[,train.bi.mi.stem.order[1:300]], labels[index.train], alpha=1, family="binomial", type.measure="class")
-tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train.bi.dtm), classlabel=labels[index.train]), cp=0, method="class")
+mod4 <- randomForest(as.factor(classlabel)~., data=data.frame(as.matrix(train.stem)[,train.mi.order[1:200]], classlabel=labels[index.train]), mtry=sqrt(ncol(train.stem)), ntree=100)
+mod5 <- train.mnb(as.matrix(train.bi.stem)[,train.bi.mi.stem.order[1:400]], labels[index.train])
+mod6 <- cv.glmnet(as.matrix(train.bi.stem)[,train.bi.mi.stem.order[1:200]], labels[index.train], alpha=1, family="binomial", type.measure="class")
+tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train.bi.stem), classlabel=labels[index.train]), cp=0, method="class")
 mod7 <- prune(tempTree, cp=cp.select(tempTree))
-mod8 <- randomForest(classlabel~., data=data.frame(as.matrix(train.bi.stem)[,train.bi.mi.stem.order[1:500]], classlabel=labels[index.train]), mtry=sqrt(ncol(train.bi.stem)), ntree=100)
+mod8 <- randomForest(classlabel~., data=data.frame(as.matrix(train.bi.stem)[,train.bi.mi.stem.order[1:400]], classlabel=labels[index.train]), mtry=sqrt(ncol(train.bi.stem)), ntree=100)
 
-# TO DO: Change test sets
 p1 <- predict.mnb(mod1, as.matrix(test.dtm)[,train.mi.nostem.order[1:300]])
-p2 <- predict(mod2, newx=as.matrix(test.stem)[,train.mi.order[1:200]], s="lambda.1se",type="class")
-p3 <- predict(mod3, newdata=data.frame(as.matrix(test.dtm)),type="class")
-pTemp <- predict(mod4, newdata = data.frame(as.matrix(test.stem)[,train.mi.order[1:500]]), type="class")
-p4 <- as.numeric(pTemp > 0.5)
-p5 <- predict.mnb(mod5, as.matrix(test.bi.stem))
-p6 <- predict(mod6, newx=as.matrix(test.bi.stem)[,train.bi.mi.stem.order[1:300]], s="lambda.1se", type="class")
-p7 <- predict(mod7, newdata=data.frame(as.matrix(test.bi.dtm)), type="class")
-pTemp <- predict(mod8, newdata = data.frame(as.matrix(test.bi.stem)[,train.bi.mi.stem.order[1:500]]), type="class")
+p2 <- predict(mod2, newx=as.matrix(test.stem)[,train.mi.order[1:100]], s="lambda.1se",type="class")
+p3 <- predict(mod3, newdata=data.frame(as.matrix(test.stem)[,train.mi.order[1:25]]),type="class")
+p4 <- predict(mod4, newdata = data.frame(as.matrix(test.stem)[,train.mi.order[1:200]]), type="class")
+p5 <- predict.mnb(mod5, as.matrix(test.bi.stem)[,train.bi.mi.stem.order[1:400]])
+p6 <- predict(mod6, newx=as.matrix(test.bi.stem)[,train.bi.mi.stem.order[1:200]], s="lambda.1se", type="class")
+p7 <- predict(mod7, newdata=data.frame(as.matrix(test.bi.stem)), type="class")
+pTemp <- predict(mod8, newdata = data.frame(as.matrix(test.bi.stem)[,train.bi.mi.stem.order[1:400]]), type="class")
 p8 <- as.numeric(pTemp > 0.5)
 
 newbest <- numeric(8)
