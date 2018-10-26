@@ -1,12 +1,24 @@
 ---
 title: "DMA 2 V2"
-output: html_notebook
+output:
+  pdf_document: default
+  html_notebook: default
 ---
 
 # Load the text files into memory
 ```{r}
 time.start <- Sys.time()
+library(parallel)
+library(doParallel)
+library(foreach)
+library(caret)
 library(tm)
+# closeAllConnections()
+stopImplicitCluster()
+registerDoSEQ()
+cl <- makeCluster(4, type="PSOCK") # Set up parallel processing
+registerDoParallel(cl, 4)
+
 reviews.decep <- VCorpus(DirSource("C:/users/koenn/Google Drive/DM/Practical/DMA2/Reviews/deceptive", encoding="UTF-8", recursive=TRUE))
 reviews.truth <- VCorpus(DirSource("C:/users/koenn/Google Drive/DM/Practical/DMA2/Reviews/truthful", encoding="UTF-8", recursive=TRUE))
 reviews.all <- c(reviews.decep, reviews.truth)
@@ -100,33 +112,42 @@ createModels <- function(suffix, train, BiTrain, test, BiTest, labels) {
 
   assign(paste0("mod1", suffix), train.mnb(as.matrix(train),labels),envir=.GlobalEnv)
 
-  assign(paste0("mod2", suffix), cv.glmnet(as.matrix(train), labels, family="binomial",type.measure="class"), envir=.GlobalEnv)
+  assign(paste0("mod2", suffix), cv.glmnet(as.matrix(train), labels, family="binomial",type.measure="class", parallel=TRUE), envir=.GlobalEnv)
 
-  tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train), classlabel=labels), cp=0, method="class")
+  tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train), classlabel=labels), minsplit=0, cp=0, method="class")
   assign(paste0("mod3", suffix), prune(tempTree, cp=cp.select(tempTree)),envir=.GlobalEnv)
 
-  assign(paste0("mod4", suffix), randomForest(as.factor(classlabel)~., data=data.frame(as.matrix(train),classlabel=labels), mtry=sqrt(ncol(train)), ntree=100),envir=.GlobalEnv)
+  # assign(paste0("mod4", suffix), randomForest(as.factor(classlabel)~., data=data.frame(as.matrix(train),classlabel=labels), mtry=sqrt(ncol(train)), ntree=100),envir=.GlobalEnv)
+  mtry <- sqrt(ncol(train))
+  x.rf <- data.frame(as.matrix(train), classlabel=labels)
+  assign(paste0("mod4", suffix), foreach(n=rep(100/4,4), .combine=combine, .multicombine=TRUE, .packages='randomForest') %dopar% {
+      randomForest(as.factor(classlabel)~., data=x.rf, ntree=n, mtry=mtry)
+    }, envir=.GlobalEnv)
 
   assign(paste0("mod5", suffix), train.mnb(as.matrix(BiTrain), labels),envir=.GlobalEnv)
 
-  assign(paste0("mod6", suffix), cv.glmnet(as.matrix(BiTrain), labels, family="binomial",type.measure="class"),envir=.GlobalEnv)
-   tempTree <- rpart(classlabel~.,data=data.frame(as.matrix(BiTrain),classlabel=labels), cp=0, method="class")
-
+  assign(paste0("mod6", suffix), cv.glmnet(as.matrix(BiTrain), labels, family="binomial",type.measure="class", parallel=TRUE),envir=.GlobalEnv)
+  
+   tempTree <- rpart(classlabel~.,data=data.frame(as.matrix(BiTrain),classlabel=labels), minsplit=0, cp=0, method="class")
   assign(paste0("mod7", suffix),prune(tempTree, cp=cp.select(tempTree)),envir=.GlobalEnv)
 
-  assign(paste0("mod8", suffix), randomForest(classlabel~., data=data.frame(as.matrix(BiTrain),classlabel=labels), mtry=sqrt(ncol(BiTrain)), ntree=100),envir=.GlobalEnv)
+  # assign(paste0("mod8", suffix), randomForest(classlabel~., data=data.frame(as.matrix(BiTrain),classlabel=labels), mtry=sqrt(ncol(BiTrain)), ntree=100),envir=.GlobalEnv)
+  
+  mtry <- sqrt(ncol(BiTrain))
+  x.rf <- data.frame(as.matrix(BiTrain), classlabel=labels)
+  assign(paste0("mod8", suffix), foreach(n=rep(100/4,4), .combine=combine, .multicombine=TRUE, .packages='randomForest') %dopar% {
+    randomForest(as.factor(classlabel)~., data=x.rf, ntree=n, mtry=mtry)
+  },envir=.GlobalEnv)
   
   # Prediction
   pred.cv[[1]] <- predict.mnb(get(paste0("mod1", suffix)), as.matrix(test))
   pred.cv[[2]] <- predict(get(paste0("mod2", suffix)), newx=as.matrix(test),s="lambda.1se",type="class")
   pred.cv[[3]] <- predict(get(paste0("mod3", suffix)), newdata=data.frame(as.matrix(test)),type="class")
-  pTemp <- predict(get(paste0("mod4", suffix)), newdata = data.frame(as.matrix(test)), type = "class")
-  pred.cv[[4]] <- as.numeric(pTemp > 0.5)
+  pred.cv[[4]] <- predict(get(paste0("mod4", suffix)), newdata = data.frame(as.matrix(test)), type = "class")
   pred.cv[[5]] <- predict.mnb(get(paste0("mod5", suffix)), as.matrix(BiTest))
   pred.cv[[6]] <- predict(get(paste0("mod6", suffix)), newx=as.matrix(BiTest), s="lambda.1se", type="class")
   pred.cv[[7]] <- predict(get(paste0("mod7", suffix)), newdata=data.frame(as.matrix(BiTest)), type="class")
-  pTemp <- predict(get(paste0("mod8", suffix)), newdata = data.frame(as.matrix(BiTest)), type = "class")
-  pred.cv[[8]] <- as.numeric(pTemp > 0.5)
+  pred.cv[[8]] <- predict(get(paste0("mod8", suffix)), newdata = data.frame(as.matrix(BiTest)), type = "class")
   
   return(pred.cv)
 }
@@ -138,6 +159,7 @@ Because we do not want to use all features (`dim(train.dtm)` is `[1]  640 6900`)
 # Sparsity
 ```{r, warning=FALSE}
 set.seed(37729)
+library(caret)
 k <- 10 #set the number of folds to 10
 accvec.sparse <- matrix(nrow=8, ncol=3)
 accvec.cv <- matrix(nrow=10, ncol=8)
@@ -248,10 +270,6 @@ So, applying stemming is slightly better than when we don't apply stemming. A fu
 Mutual information (MI) of two random variables is a measure of the mutual dependence between the two variables. More specifically, it quantifies the "amount of information" obtained about one random variable through observing the other random variable. We compare the top 200, top 100, top 50, and top 25 to see which one performs best using 10-fold CV. Although stemming did not prove to improve all methods, the differences are close and they also do not seem to hurt the improvement. Especially for logistic regression, stemming is an improvement and we will therefore use it when calculating mutual information. 
 
 ```{r, warning=FALSE}
-# Apply stemming to data
-# train.dtm <- train.stem
-# train.bi.dtm <- train.bi.stem
-
 set.seed(12548)
 k <- 10 #set the number of folds to 10
 accvec.mi <- matrix(nrow=8, ncol=7)
@@ -264,15 +282,15 @@ accuracy <- function(obs, pred){
 mi <- c(25, 50, 100, 200, 300, 400, 500)
 
 library(entropy)
-train.mi <- apply(as.matrix(train.stem), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
-train.mi.order <- order(train.mi,decreasing=T)
-train.bi.mi <- apply(train.bi.stem, 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
-train.bi.mi.stem.order <- order(train.bi.mi,decreasing=T)
-
 for(i in 1:length(mi)) {
   cat("\nCalculating Mutual information top ", mi[i])
 
   for(j in 1:k) {
+    train.mi <- parApply(cl, as.matrix(train.stem)[folds!=j,], 2, function(x,y) { require(entropy); mi.plugin(table(x,y)/length(y)) }, (labels[index.train])[folds!=j])
+    train.mi.order <- order(train.mi,decreasing=T)
+    train.bi.mi <- parApply(cl, train.bi.stem[folds!=j,], 2, function(x,y) { require(entropy); mi.plugin(table(x,y)/length(y)) }, (labels[index.train])[folds!=j])
+    train.bi.mi.stem.order <- order(train.bi.mi,decreasing=T)
+    
     pred.cv <- createModels(
       suffix=".mi", 
       train=(as.matrix(train.stem)[,train.mi.order[1:mi[i]]])[folds!=j,], 
@@ -315,7 +333,7 @@ train.mat <- as.matrix(train.stem)
 nRows <- nrow(train.mat)
 nCols <- ncol(train.mat)
 train.mat <- matrix(as.numeric(train.mat > 0),nrow=nRows,ncol=nCols)
-train.idf <- apply(train.mat,2,sum)
+train.idf <- parApply(cl, train.mat,2,sum)
 train.idf <- log2(nRows/train.idf)
 test.tf <- as.matrix(train.stem) # Use training data instead of test data
 for(i in 1:1114){test.tf[,i] <- test.tf[,i]*train.idf[i]}
@@ -327,7 +345,7 @@ train.bi.mat <- as.matrix(train.bi.stem)
 nRows <- nrow(train.bi.mat)
 nCols <- ncol(train.bi.mat)
 train.bi.mat <- matrix(as.numeric(train.bi.mat > 0),nrow=nRows,ncol=nCols)
-train.bi.idf <- apply(train.bi.mat,2,sum)
+train.bi.idf <- parApply(cl, train.bi.mat,2,sum)
 train.bi.idf <- log2(nRows/train.bi.idf)
 test.bi.tf <- as.matrix(train.bi.stem) # Use training instead of test data
 for(i in 1:1575){test.bi.tf[,i] <- test.bi.tf[,i]*train.bi.idf[i]}
@@ -358,13 +376,14 @@ for(i in 1:nrow(mod.mat)) {
 ```
 
 Based on these results, we can draw the follow inferences:
-* Naive Bayes: Non-stemming gives an improvement over stemming. Additonally, the top-300 features based on mutual information give the higher accuracy of 0.8880763. We will combine these two to see if this indeed performs better.
-* Logistic regression: As concluded before, stemming seems to give a small improvement in comparison to non-stemmed features. The top-200 features based on mutual information give the higher accuracy of 0.8702152.
-* Decision tree: Interestingly, a single decision tree seems to work abysmally in comparison to the other methods. Also unlike the other methods, a decision tree seems to work best when either all the non-stemmed features are used or when only when the top-25 features are used based on mutual information. We will combine these two just to be sure.
-* Random forests: Fortunately, random forests perform much better than just a single tree. The top-500 features with stemming seems most promising and so we will put this to the test in the next session. 
-* Naive Bayes with uni- and bigrams: The top-300 features seem to hit the mark when using NB. Since non-stemmed features perform slightly better, we will have to see if a combination of the two provides an improvement.
-* Logistic regression with uni- and bigrams: Similar to logistic regression with only unigrams, this algorithm with bigrams performs best with stemmed features. This time the top 300 is used instead.
-* Decision tree with uni- and bigrams: The results for this algorithm is inconclusive. On the one hand, features with a sparsity level of $<0.99$ seem to performed best, but this should of course be equivalent to the results of 'no stemming' since no stemming was used when calculating the sparsity levels. However, the results also show that stemming performs better than no stemming. Consequently, we will validate these results in the next section by using both stemming and a sparsity level of 0.99.
+* Naive Bayes: No stemming gives an improvement over stemming. Additonally, there is a discrepancy between the CV for sparsities and stemming, which is likely caused by the natural fluctuation of CV. 
+* Logistic regression: As concluded before, stemming seems to give a small improvement in comparison to non-stemmed features. The top-200 features based on mutual information is only slightly behind this result. Another interesting fact to note is that a sparsity level of 0.95 forms an improvement over a level of 0.99. We will combine stemming and remove sparse results at the 0.95 level to see if this indeed holds true.
+* Decision tree: Interestingly, a single decision tree seems to work abysmally in comparison to the other methods. Unstemmed features at a sparsity level of 0.99 seem to work best for decision trees. However, the results for sparsity CV and stemming CV should be close to the same while they are in fact not. This may denote a high variance of the method. For this reason and due to Occam's Razor, we choose to select the top-500 features based on mutual information. 
+* Random forests: Fortunately, random forests perform much better than just a single tree. The top-500 features with stemming seems most promising. However, since no stemming seems to be an improvement over stemming, we try to combine these to two methods in the next section.
+
+* Naive Bayes with uni- and bigrams: Simply using unstemmed features at a sparsity level of 0.99 seems to hit the mark when using NB. 
+* Logistic regression with uni- and bigrams: Similar to logistic regression with only unigrams, this algorithm with bigrams performs best with stemmed features. This time the top 500 is used instead.
+* Decision tree with uni- and bigrams: Clearly, the top-300 features using mutual information gives the highest accuracy. However, when calculating mutual information stemmed features were used, while no stemming seems to be an improvement. We will have to validate this in the next section by combining the two. 
 * Random forests with uni- and bigrams: Similar to random forests with only unigrams, the top-500 features with stemming seems most promising.
 
 Now we make a comparison after which we select our final models. Since we have already created the models for decision trees, logistic regression, random forests, random forests with uni- and bigrams, and logistic regression with uni- and bigrams, we do not need to train these again.
@@ -375,105 +394,290 @@ for(i in 1:nrow(mod.mat)) {
   best.mat[i,] <- max(mod.mat[i,])
 }
 newbest <- numeric(8)
-newbest[c(2,3,4,6,7,8)] <- best.mat[c(2,3,4,6,7,8),1]
+newbest[c(1,3,5,6,8)] <- best.mat[c(1,3,5,6,8),1]
 
-# First, we set up the data we need
-
-# Tree bi: sparsity 0.99, stem -> No need to train
-# Log: mi 200, stem -> No need to train!
-# RF: mi 500, stem
-# RF bi: mi 500, stem
-# Log bi: mi 300, stem
-
-# Now for non-stemmed data
-# library(RWeka)
-# train.dtm <- DocumentTermMatrix(reviews.all[index.train])
-# train.bi.dtm <- DocumentTermMatrix(reviews.all[index.train], 
-# control = list(tokenize = BigramTokenizer))
-# train.bi <- cbind(as.matrix(train.dtm),as.matrix(train.bi.dtm)) # Merge unigrams and bigrams
-
-library(entropy)
-train.mi.nostem <- apply(as.matrix(train.dtm), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
-train.mi.nostem.order <- order(train.mi.nostem,decreasing=T)
-train.bi.mi <- apply(train.bi, 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
-train.bi.mi.order <- order(train.bi.mi,decreasing=T)
-
-set.seed(37729)
+set.seed(44143)
 k <- 10 #set the number of folds to 10
 accvec.bs <- rep(0, k)
 folds <- createFolds(1:train.dtm$nrow, k=k, list=FALSE)
 accuracy <- function(obs, pred){
   sum(obs == pred) / length(obs)
 }
-# Tree: mi 25, non-stem
-# for(j in 1:k) {
-#   tempTree <- rpart(classlabel~., data=data.frame((as.matrix(train.dtm)[,train.mi.nostem.order[1:20]])[folds!=j,], classlabel=(labels[index.train])[folds!=j]), cp=0, method="class") #train on all but fold j
-#   mod <- prune(tempTree, cp=cp.select(tempTree)) # Select best CP
-#   pred <- predict(mod, newdata = data.frame((as.matrix(train.dtm)[,train.mi.nostem.order[1:20]])[folds==j,]), type="class") #validate on fold j
-#   accvec.bs[j] <- accuracy((labels[index.train])[folds==j], pred)
-# }
-# newbest[3] <- mean(accvec.bs)
 
-# NB: mi 300, non-stem
+# mod 2: sparse 0.95 and stemming
+train.stem.95 <- DocumentTermMatrix(reviews.all.stem[index.train])
+train.stem.95 <- removeSparseTerms(train.stem, 0.95)
+accvec.95 <- numeric(10)
 for(j in 1:k) {
-  mod<- train.mnb((as.matrix(train.dtm)[,train.mi.nostem.order[1:300]])[folds!=j,], (labels[index.train])[folds!=j]) #train on all but fold j 
-  pred <- predict.mnb(mod, (as.matrix(train.dtm)[,train.mi.nostem.order[1:300]])[folds==j,]) #validate on fold j
-  accvec.bs[j] <- accuracy((labels[index.train])[folds==j], pred)
+  mod <- cv.glmnet(as.matrix(train.stem.95)[folds!=j,], (labels[index.train])[folds!=j], family="binomial", type.measure="class", parallel=TRUE)
+  pred <- predict(mod, newx=as.matrix(train.stem.95)[folds==j,],s="lambda.1se",type="class")
+  accvec.95[j] <- accuracy((labels[index.train])[folds==j], pred)
 }
-newbest[1] <- mean(accvec.bs)
+newbest[2] <- mean(accvec.95)
 
-# NB bi: mi 400, non-stem
+# mod 4: mi 500 no stemming
+accvec.mod4 <- numeric(10)
 for(j in 1:k) {
-  mod<- train.mnb((train.bi[,train.bi.mi.order[1:400]])[folds!=j,], (labels[index.train])[folds!=j]) #train on all but fold j 
-  pred <- predict.mnb(mod, (train.bi[,train.bi.mi.order[1:400]])[folds==j,]) #validate on fold j
-  accvec.bs[j] <- accuracy((labels[index.train])[folds==j], pred)
-}
-newbest[5] <- mean(accvec.bs)
+  train.mi.nostem <- parApply(cl, as.matrix(train.dtm)[folds!=j,], 2, function(x,y) { require(entropy); mi.plugin(table(x,y)/length(y)) }, (labels[index.train])[folds!=j])
+  train.mi.nostem.order <- order(train.mi.nostem,decreasing=T)
+  
+  x <- data.frame((as.matrix(train.dtm)[,train.mi.nostem.order[1:500]])[folds!=j,], classlabel=(labels[index.train])[folds!=j])
+  mtry <- sqrt(ncol(train.dtm))
+  
+  mod <- foreach(n=rep(100/4,4), .combine=combine, .multicombine=TRUE, .packages='randomForest') %dopar% {
+    randomForest(as.factor(classlabel)~., data=x, ntree=n, mtry=mtry)
+  }
 
-best.mat <- cbind(best.mat, newbest)
-rownames(best.mat) <- rownames(mod.mat)
-colnames(best.mat) <- c("Old Accuracy", "New Accuracy")
-best.mat
+  pred <- predict(mod, newdata=data.frame((as.matrix(train.dtm)[,train.mi.nostem.order[1:500]])[folds==j,]), type="class")
+  
+  accvec.mod4[j] <- accuracy((labels[index.train])[folds==j], pred)
+}
+newbest[4] <- mean(accvec.mod4)
+
+
+# mod 7: mi 300 and no stemming
+accvec.mod7 <- numeric(10)
+for(j in 1:k) {
+  train.bi.mi.nostem <- parApply(cl, train.bi.dtm[folds!=j,], 2, function(x,y) { require(entropy); mi.plugin(table(x,y)/length(y)) }, (labels[index.train])[folds!=j])
+  train.bi.mi.nostem.order <- order(train.bi.mi.nostem,decreasing=T)
+  
+  tempTree <- rpart(classlabel~., data=data.frame((as.matrix(train.bi.dtm)[,train.bi.mi.nostem.order[1:300]])[folds!=j,], classlabel=(labels[index.train])[folds!=j]), cp=0, method="class")
+  
+  mod <- prune(tempTree, minsplit=0, cp=cp.select(tempTree))
+  
+  predict(mod, newdata=data.frame((as.matrix(train.bi.dtm)[,train.bi.mi.nostem.order[1:300]])[folds==j,]), type="class")
+  
+  accvec.mod7[j] <- accuracy((labels[index.train])[folds==j], pred)
+}
+newbest[7] <- mean(accvec.mod7)
+
+# best.mat <- cbind(best.mat, newbest)
+# rownames(best.mat) <- rownames(mod.mat)
+# colnames(best.mat) <- c("Old Accuracy", "New Accuracy")
+# best.mat
+cbind(best.mat, newbest)
 ```
 
-The results for a single decision tree are disappointing. Interestingly, Naive Bayes with uni- and bigrams seems to still score slightly below its previous highest accuracy for which it used the top-300 stemmed features based on mutual information. The only model that has improved is naive with unigrams. Therefore, we will use this new model.
+The results for logistic regression with unigrams and random forests with unigrams have not improved. In contrast, the accuracy of a single decision tree with bigrams has improved dramatically.
+
+# Hyperparameter tuning
+We finish our model building with some ad-hoc hyperparameter tuning to prove our model's worth. In essence, we have four kinds of models and we briefly discuss the extent of their hyperparameters below. Note that we limit the scope of the hyperparameters since we cannot possibly try them all:
+* Naive Bayes: The Naive Bayes model does not have parameters that are tunable. That is, all tuning to the hyperparameters has already been performed in the previous section on feature selection.
+* Logistic regression: The most important parameter for logistic regression is the lambda value which penalises overly complex models. Luckily. `cv.glmnet` automatically crossvalidates possible lambda values so we do not need to do this again. However, there is still a choice to be made whether to pick the lowest possible lambda, or choose for a slighly less complicated model by picking a lambda value still within 1 standard error of the lowest lambda value (1-SE method). 
+* Decision tree: We have been selecting the best hyperparameters for a single decision tree the entire time. Note how `rpart` automatically collects possible complexity parameter (cp) values. In the initial tree, we set `minsplit` and `cp` to 0 as to not discourage rpart. Then, we prune the try by inspecting the cp table and picking the lowest value for lambda within one standard error. Similar to logistic regression, we need to test whether the 'best' or 'simplest' model is preferred.
+* Random forests: When it comes to random forests, there are two parameters that require special attention. So far we have been setting the number of trees in a random forest to 100 and the number of features $M$ for a split equivalent to $\sqrt{M}$. First, we try a range of trees to see how many trees random forests needs to be maximised. Then, we use four different equations for the number of features, i.e. $M/3$, $sqrt(M)$, $log_2(M + 1)$, $ln(M)$. 
+
+```{r}
+set.seed(15613)
+k <- 10 #set the number of folds to 10
+folds <- createFolds(1:train.dtm$nrow, k=k, list=FALSE)
+accuracy <- function(obs, pred){
+  sum(obs == pred) / length(obs)
+}
+
+accvec.lambda <- matrix(ncol=2,nrow=10)
+for(j in 1:k) {
+  mod <- cv.glmnet(as.matrix(train.stem)[folds!=j,], (labels[index.train])[folds!=j], alpha=1, family="binomial",type.measure="class", parallel=TRUE)
+  pred1 <- predict(mod, newx=as.matrix(train.stem)[folds==j,], s="lambda.1se",type="class")
+  pred2 <- predict(mod, newx=as.matrix(train.stem)[folds==j,], s="lambda.min",type="class")
+  accvec.lambda[j,1] <- accuracy((labels[index.train])[folds==j], pred1)
+  accvec.lambda[j,2] <- accuracy((labels[index.train])[folds==j], pred2)
+}
+colnames(accvec.lambda) <- c("1se", "min")
+
+accvec.bi.lambda <- matrix(ncol=2,nrow=10)
+for(j in 1:k) {
+  train.bi.mi <- parApply(cl, train.bi.stem[folds!=j,], 2, function(x,y) { require(entropy); mi.plugin(table(x,y)/length(y)) }, (labels[index.train])[folds!=j])
+  train.bi.mi.order <- order(train.bi.mi,decreasing=T)
+  
+  mod <- cv.glmnet((as.matrix(train.bi.stem)[,train.bi.mi.order[1:500]])[folds!=j,], (labels[index.train])[folds!=j], alpha=1, family="binomial",type.measure="class", parallel=TRUE)
+  pred1 <- predict(mod, newx=(as.matrix(train.bi.stem)[,train.bi.mi.order[1:500]])[folds==j,], s="lambda.1se",type="class")
+  pred2 <- predict(mod, newx=(as.matrix(train.bi.stem)[,train.bi.mi.order[1:500]])[folds==j,], s="lambda.min",type="class")
+  accvec.bi.lambda[j,1] <- accuracy((labels[index.train])[folds==j], pred1)
+  accvec.bi.lambda[j,2] <- accuracy((labels[index.train])[folds==j], pred2)
+}
+colnames(accvec.bi.lambda) <- c("1se", "min")
+cat("Average accuracy for logistic regression with unigrams: \n")
+colMeans(accvec.lambda)
+cat("Average accuracy for logistic regression with uni- and bigrams: \n")
+colMeans(accvec.bi.lambda)
+```
+The differences in results are negligible. Again, due to Occam's Razor, we prefer the simpler model that is within one standard error of the best model. Another key observation to point out is that accuracy for _both_ models is significantly lower than during the previous CV rounds. This goes to show how volatile the results are.  
+
+We proceed by testing the tuning parameters for random forests, that is mtry and ntree.
+```{r}
+set.seed(48681)
+k <- 10 #set the number of folds to 10
+accvec.rf.ntree <- rep(0, k)
+accvec.rf.ntree.bi <- rep(0,k)
+accvec.ntree <- rep(0, 7)
+accvec.ntree.bi <- rep(0, 7)
+folds <- createFolds(1:train.stem$nrow, k=k, list=FALSE)
+accuracy <- function(obs, pred){
+  sum(obs == pred) / length(obs)
+}
+
+ntree <- c(50, 75, 100, 200, 300, 400, 500) # Approx 11000 trees
+mtry <- sqrt(train.stem$ncol)
+
+for(i in 1:length(ntree)) {
+  for(j in 1:k) {
+    train.mi <- parApply(cl, as.matrix(train.stem)[folds!=j,], 2, function(x,y) { require(entropy); mi.plugin(table(x,y)/length(y)) }, (labels[index.train])[folds!=j])
+  train.mi.order <- order(train.mi,decreasing=T)
+
+     x <- data.frame((as.matrix(train.stem)[,train.mi.order[1:500]])[folds!=j,], classlabel=(labels[index.train])[folds!=j])
+    
+    #  mod <- foreach(n=rep(ntree[i]/4,4), .combine=randomForest::combine, .multicombine=TRUE, .packages='randomForest') %dopar% {
+    #   randomForest(as.factor(classlabel)~., data=x, ntree=n, mtry=mtry)
+    #  }
+    #  
+    # pred <- predict(mod, newdata=data.frame((as.matrix(train.stem)[,train.mi.order[1:500]])[folds==j,]), type="class")
+
+    mod <- randomForest(as.factor(classlabel)~., data=x, ntree=ntree[i], mtry=mtry)
+
+    pred <- predict(mod, newdata=data.frame((as.matrix(train.stem)[,train.mi.order[1:500]])[folds==j,]), type="class")
+
+    accvec.rf.ntree[j] <- accuracy((labels[index.train])[folds==j], pred)
+  }
+  accvec.ntree[i] <- mean(accvec.rf.ntree)
+}
+
+for(i in 1:length(ntree)) {
+  for(j in 1:k) {
+    train.bi.mi <- apply(as.matrix(train.bi.stem)[folds!=j,], 2, function(x,y) { require(entropy); mi.plugin(table(x,y)/length(y)) }, (labels[index.train])[folds!=j])
+  train.bi.mi.order <- order(train.bi.mi,decreasing=T)
+  
+  x <- data.frame((as.matrix(train.bi.stem)[,train.bi.mi.order[1:500]])[folds!=j,], classlabel=(labels[index.train])[folds!=j])
+    mtry <- sqrt(ncol(x))
+    # mod.bi <- foreach(n=rep(ntree[i]/4,4), .combine=randomForest::combine, .multicombine=TRUE, .packages='randomForest') %dopar% {
+    #   randomForest(as.factor(classlabel)~., data=x, ntree=n, mtry=mtry)
+    # }
+    mod.bi <- randomForest(as.factor(classlabel)~., data=x, ntree=ntree[i], mtry=mtry)
+    
+    pred.bi <- predict(mod.bi, newdata=data.frame((as.matrix(train.bi.stem)[,train.bi.mi.order[1:500]])[folds==j,]), type="class")
+    accvec.rf.ntree.bi[j] <- accuracy((labels[index.train])[folds==j], pred.bi)
+  }
+  accvec.ntree.bi[i] <- mean(accvec.rf.ntree.bi)
+}
+cbind(ntree, accvec.ntree, accvec.ntree.bi)
+```
+So, for random forests with unigrams we take 300 trees, while for random forests with uni- and bigrams we average over 300 trees.
+
+Now for mtry
+```{r}
+ntree2 <- 300
+nfeat <- ncol(train.stem)
+mtry <- c(nfeat/3, sqrt(nfeat), log2(nfeat + 1), log(nfeat)) 
+mtry.name <- c("M/3", "sqrt(M)", "log2(M + 1)", "ln(M)") # Regression, standard, Breiman, log transform
+
+set.seed(94855)
+k <- 10 #set the number of folds to 10
+accvec.rf.mtry <- rep(0, k)
+accvec.mtry <- rep(0, 4)
+folds <- createFolds(1:train.dtm$nrow, k=k, list=FALSE)
+
+for(i in 1:length(mtry)) {
+  for(j in 1:k) {
+    train.mi <- parApply(cl, as.matrix(train.stem)[folds!=j,], 2, function(x,y) { require(entropy); mi.plugin(table(x,y)/length(y)) }, (labels[index.train])[folds!=j])
+  train.mi.order <- order(train.mi,decreasing=T)
+  
+    x <- data.frame((as.matrix(train.stem)[,train.mi.order[1:500]])[folds!=j,], classlabel=(labels[index.train])[folds!=j])
+    
+    mod <- foreach(n=rep(ntree2/4,4), .combine=combine, .multicombine=TRUE, .packages='randomForest') %dopar% {
+      randomForest(as.factor(classlabel)~., data=x, ntree=n, mtry=mtry[i])
+    }
+    pred <- predict(mod, newdata=data.frame((as.matrix(train.stem)[,train.mi.order[1:500]])[folds==j,]), type="class")
+    accvec.rf.mtry[j] <- accuracy((labels[index.train])[folds==j], pred)
+  }
+  accvec.mtry[i] <- mean(accvec.rf.mtry)
+}
+
+accvec.rf.bi.mtry <- rep(0, k)
+accvec.bi.mtry <- rep(0, 4)
+ntree2 <- 300
+nfeat <- ncol(train.bi.stem)
+mtry <- c(nfeat/3, sqrt(nfeat), log2(nfeat + 1), log(nfeat)) 
+mtry.name <- c("M/3", "sqrt(M)", "log2(M + 1)", "ln(M)") # Regression, standard, Breiman, log transform
+for(i in 1:length(mtry)) {
+  
+  for(j in 1:k) {
+    train.bi.mi <- parApply(cl, as.matrix(train.bi.stem)[folds!=j,], 2, function(x,y) { require(entropy); mi.plugin(table(x,y)/length(y)) }, (labels[index.train])[folds!=j])
+  train.bi.mi.order <- order(train.bi.mi,decreasing=T)
+  
+    x <- data.frame((as.matrix(train.bi.stem)[,train.bi.mi.order[1:500]])[folds!=j,], classlabel=(labels[index.train])[folds!=j])
+    
+    mod <- foreach(n=rep(ntree2/4,4), .combine=combine, .multicombine=TRUE, .packages='randomForest') %dopar% {
+      randomForest(as.factor(classlabel)~., data=x, ntree=n, mtry=mtry[i])
+    }
+    pred <- predict(mod, newdata=data.frame((as.matrix(train.bi.stem)[,train.bi.mi.order[1:500]])[folds==j,]), type="class")
+    accvec.rf.bi.mtry[j] <- accuracy((labels[index.train])[folds==j], pred)
+  }
+  accvec.bi.mtry[i] <- mean(accvec.rf.mtry)
+}
+cat("\nBest number of trees for unigrams is ", ntree[which.max(accvec.ntree)], ". Best feature transformation is ", mtry.name[which.max(accvec.mtry)])
+cat("\nBest number of trees for uni- and bigrams is ", ntree[which.max(accvec.ntree.bi)], ". Best feature transformation is ", mtry.name[which.max(accvec.bi.mtry)])
+```
+
+The results of random forests for uni- and bigrams is achieved by sampling ln(M) features at every split. For random forests with uni- and bigrams the results are a bit more complicated. The average accuracy for all transformations are exactly the same. The reason for this is unclear, especially considering the same code was used as for the unigrams only the data was changed to include bigrams. 
 
 # Final Testing of the Models
 ```{r}
-# mod1 mi 300 no stem
-# mod2 mi 100 stem
-# mod3 mi 25  stem
-# mod4 mi 200 stem
-# mod5 mi 400 stem
-# mod6 mi 200 stem
-# mod7 sparse stem
-# mod8 mi 400 stem
+# mod1 train.dtm
+# mod2 train.stem, lambda = 1se
+# mod3 mi 500 train.stem
+# mod4 mi 500 train.stem, ntree=300, mtry=ln(M)
+# mod5 train.bi.dtm
+# mod6 mi 500 train.bi.stem, lambda = 1se
+# mod7 mi 300 and no stemming, 
+# mod8 mi 500 train.bi.stem, ntree=300, mtry=ln(M) 
 
-mod1 <- train.mnb(as.matrix(train.dtm)[,train.mi.nostem.order[1:300]], labels[index.train])
-mod2 <- cv.glmnet(as.matrix(train.stem)[,train.mi.order[1:100]], labels[index.train], alpha=1, family="binomial",type.measure="class")
-tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train.stem)[,train.mi.order[1:25]], classlabel=labels[index.train]), cp=0, method="class")
+# Revive mi
+train.mi <- apply(as.matrix(train.stem), 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
+train.mi.order <- order(train.mi,decreasing=T)
+train.bi.mi <- apply(train.bi.dtm, 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
+train.bi.mi.order <- order(train.bi.mi,decreasing=T)
+train.bi.mi.stem <- apply(train.bi.stem, 2, function(x,y) { mi.plugin(table(x,y)/length(y)) }, labels[index.train])
+train.bi.mi.stem.order <- order(train.bi.mi.stem,decreasing=T)
+
+mod1 <- train.mnb(as.matrix(train.dtm), labels[index.train])
+mod2 <- cv.glmnet(as.matrix(train.stem), labels[index.train], alpha=1, family="binomial",type.measure="class", parallel=TRUE)
+tempTree <- rpart(as.factor(classlabel)~., data=data.frame(as.matrix(train.stem)[,train.mi.order[1:500]], classlabel=labels[index.train]), minsplit=0, cp=0, method="class")
 mod3 <- prune(tempTree, cp=cp.select(tempTree))
-mod4 <- randomForest(as.factor(classlabel)~., data=data.frame(as.matrix(train.stem)[,train.mi.order[1:200]], classlabel=labels[index.train]), mtry=sqrt(ncol(train.stem)), ntree=100)
-mod5 <- train.mnb(as.matrix(train.bi.stem)[,train.bi.mi.stem.order[1:400]], labels[index.train])
-mod6 <- cv.glmnet(as.matrix(train.bi.stem)[,train.bi.mi.stem.order[1:200]], labels[index.train], alpha=1, family="binomial", type.measure="class")
-tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train.bi.stem), classlabel=labels[index.train]), cp=0, method="class")
+mod4 <- randomForest(as.factor(classlabel)~., data=data.frame(as.matrix(train.stem)[,train.mi.order[1:500]], classlabel=labels[index.train]), mtry=log(ncol(train.stem)), ntree=300)
+mod5 <- train.mnb(as.matrix(train.bi.dtm), labels[index.train])
+mod6 <- cv.glmnet(as.matrix(train.bi.stem)[,train.bi.mi.stem.order[1:500]], labels[index.train], alpha=1, family="binomial", type.measure="class")
+tempTree <- rpart(classlabel~., data=data.frame(as.matrix(train.bi.dtm)[,train.bi.mi.order[1:300]], classlabel=labels[index.train]), minsplit=0, cp=0, method="class")
 mod7 <- prune(tempTree, cp=cp.select(tempTree))
-mod8 <- randomForest(classlabel~., data=data.frame(as.matrix(train.bi.stem)[,train.bi.mi.stem.order[1:400]], classlabel=labels[index.train]), mtry=sqrt(ncol(train.bi.stem)), ntree=100)
+mod8 <- randomForest(as.factor(classlabel)~., data=data.frame(as.matrix(train.bi.stem)[,train.bi.mi.stem.order[1:500]], classlabel=labels[index.train]), mtry=log(ncol(train.bi.stem)), ntree=300)
 
-p1 <- predict.mnb(mod1, as.matrix(test.dtm)[,train.mi.nostem.order[1:300]])
-p2 <- predict(mod2, newx=as.matrix(test.stem)[,train.mi.order[1:100]], s="lambda.1se",type="class")
-p3 <- predict(mod3, newdata=data.frame(as.matrix(test.stem)[,train.mi.order[1:25]]),type="class")
-p4 <- predict(mod4, newdata = data.frame(as.matrix(test.stem)[,train.mi.order[1:200]]), type="class")
-p5 <- predict.mnb(mod5, as.matrix(test.bi.stem)[,train.bi.mi.stem.order[1:400]])
-p6 <- predict(mod6, newx=as.matrix(test.bi.stem)[,train.bi.mi.stem.order[1:200]], s="lambda.1se", type="class")
-p7 <- predict(mod7, newdata=data.frame(as.matrix(test.bi.stem)), type="class")
-pTemp <- predict(mod8, newdata = data.frame(as.matrix(test.bi.stem)[,train.bi.mi.stem.order[1:400]]), type="class")
-p8 <- as.numeric(pTemp > 0.5)
+p1 <- predict.mnb(mod1, as.matrix(test.dtm))
+p2 <- predict(mod2, newx=as.matrix(test.stem), s="lambda.1se",type="class")
+p3 <- predict(mod3, newdata=data.frame(as.matrix(test.stem)[,train.mi.order[1:500]]),type="class")
+p4 <- predict(mod4, newdata = data.frame(as.matrix(test.stem)[,train.mi.order[1:500]]), type="class")
+p5 <- predict.mnb(mod5, as.matrix(test.bi.dtm))
+p6 <- predict(mod6, newx=as.matrix(test.bi.stem)[,train.bi.mi.stem.order[1:500]], s="lambda.1se", type="class")
+p7 <- predict(mod7, newdata=data.frame(as.matrix(test.bi.dtm)[,train.bi.mi.order[1:300]]), type="class")
+p8 <- predict(mod8, newdata = data.frame(as.matrix(test.bi.stem)[,train.bi.mi.stem.order[1:500]]), type="class")
 
-newbest <- numeric(8)
+newbest <- matrix(ncol=1,nrow=8)
 for(i in 1:8)
   newbest[i] <- accuracy(labels[-index.train], get(paste0("p",i)))
-best.mat <- cbind(best.mat, newbest)
-colnames(best.mat) <- c("Old Accuracy", "New Accuracy", "Final Accuracy")
+rownames(newbest) <- c("Naive Bayes", "Logstic Regression", "Decision Tree", "Random Forest", "Naive Bayes Bigrams", "Logistic Regression Bigrams", "Decision Tree Bigrams", "Random Forest Bigrams")
+colnames(newbest) <- c("Accuracy")
+newbest
+```
+
+# Performance Testing
+```{r}
+library(caret)
+for(i in 1:8) {
+  cat("Confusion matrix for ", paste0("p",i), "\n")
+  print(confusionMatrix(data=as.factor(get(paste0("p",i))), reference=as.factor(labels[-index.train])))
+}
+if(exists("cl")) { stopCluster(cl) }
+rm(cl)
+stopImplicitCluster()
+# closeAllConnections()
 time.stop <- Sys.time()
+cat(time.stop - time.start)
 ```
