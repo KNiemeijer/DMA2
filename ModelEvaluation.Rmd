@@ -1,0 +1,29 @@
+---
+title: "Model Evaluation"
+output: html_notebook
+---
+
+
+```{r}
+# Question 1
+confusionMatrix(data=as.factor(c(p1 == labels[-index.train], p5 == labels[-index.train])), as.factor(c(p2 == labels[-index.train], p6 == labels[-index.train])), positive = NULL, dnn = c("Naive Bayes", "Logistic regression"))
+# Mcnemar's Test P-Value : 0.169
+
+# Question 2
+confusionMatrix(data=as.factor(c(p1 == labels[-index.train], p5 == labels[-index.train])), as.factor(c(p4 == labels[-index.train], p8 == labels[-index.train])), positive = NULL, dnn = c("Naive bayes", "Random forest"))
+# Mcnemar's Test P-Value : 0.099
+
+# Question 3
+confusionMatrix(data=as.factor(c(p2 == labels[-index.train], p6 == labels[-index.train])), as.factor(c(p4 == labels[-index.train], p8 == labels[-index.train])), positive = NULL, dnn = c("Logistic regression", "Random forest"))
+# Mcnemar's Test P-Value : 1
+
+# Question 4
+confusionMatrix(data=as.factor(c(p1 == labels[-index.train], p5 == labels[-index.train], p2 == labels[-index.train], p6 == labels[-index.train])), as.factor(c(p4 == labels[-index.train], p8 == labels[-index.train], p4 == labels[-index.train], p8 == labels[-index.train])), positive = NULL, dnn = c("Linear classifiers", "Random forest"))
+# Mcnemar's Test P-Value : 0.211
+
+# Question 5
+confusionMatrix(data=as.factor(c(p1 == labels[-index.train], p2 == labels[-index.train], p3 == labels[-index.train], p4 == labels[-index.train])), as.factor(c(p5 == labels[-index.train], p6 == labels[-index.train], p7 == labels[-index.train], p8 == labels[-index.train])), positive = NULL, dnn = c("Unigram", "Bigram"))
+# Mcnemar's Test P-Value : 1
+
+```
+
